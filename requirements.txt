@@ -1,2 +1,8 @@
 streamlit
 pandas
+
+numpy
+plotly
+openpyxl
+requests
+python-amazon-sp-api
