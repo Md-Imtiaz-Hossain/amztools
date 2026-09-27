@@ -72,8 +72,7 @@ def render_crud_ui():
 
     if not active_config.is_valid():
         st.warning(
-            "⚠️ Please configure your **Cloudflare Account ID**, **Database ID**, and **API Token** in the sidebar. "
-            "You can also save them in Module 3 or your `.env` file."
+            "⚠️ Please configure your **Cloudflare Account ID**, **Database ID**, and **API Token** in the sidebar."
         )
         return
 

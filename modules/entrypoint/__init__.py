@@ -11,10 +11,17 @@ Sub-components:
 """
 
 from .router import AppRouter, ModuleView
+from .session_bridge import sync_session_credentials, clear_all_credentials
 
 try:
     from .ui import render_entrypoint_app
 except ImportError:
     render_entrypoint_app = None
 
-__all__ = ["AppRouter", "ModuleView", "render_entrypoint_app"]
+__all__ = [
+    "AppRouter",
+    "ModuleView",
+    "render_entrypoint_app",
+    "sync_session_credentials",
+    "clear_all_credentials",
+]

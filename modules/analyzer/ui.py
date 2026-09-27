@@ -60,9 +60,28 @@ def render_analyzer_ui():
 
     if not is_demo:
         st.sidebar.subheader("🔐 SP-API Credentials")
-        client_id = st.sidebar.text_input("LWA Client ID", type="password", key="sp_client_id")
-        client_secret = st.sidebar.text_input("LWA Client Secret", type="password", key="sp_client_secret")
-        refresh_token = st.sidebar.text_input("Refresh Token (Atzr|...)", type="password", key="sp_refresh_token")
+        client_id = st.sidebar.text_input(
+            "LWA Client ID",
+            value=st.session_state.get("sp_client_id", ""),
+            type="password",
+            key="sp_client_id_input",
+        )
+        client_secret = st.sidebar.text_input(
+            "LWA Client Secret",
+            value=st.session_state.get("sp_client_secret", ""),
+            type="password",
+            key="sp_client_secret_input",
+        )
+        refresh_token = st.sidebar.text_input(
+            "Refresh Token (Atzr|...)",
+            value=st.session_state.get("sp_refresh_token", ""),
+            type="password",
+            key="sp_refresh_token_input",
+        )
+
+        st.session_state["sp_client_id"] = client_id.strip()
+        st.session_state["sp_client_secret"] = client_secret.strip()
+        st.session_state["sp_refresh_token"] = refresh_token.strip()
 
         market_choice = st.sidebar.selectbox("Marketplace", list(MARKETPLACE_MAP.keys()), key="sp_market_choice")
         selected_marketplace = MARKETPLACE_MAP.get(market_choice)

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Session Storage Bridge</title>
+  <script>
+    // Streamlit Component API implementation
+    function sendMessage(type, data) {
+      var payload = Object.assign({
+        isStreamlitMessage: true,
+        type: type
+      }, data || {});
+      window.parent.postMessage(payload, "*");
+    }
+
+    function setComponentValue(value) {
+      sendMessage("streamlit:setComponentValue", { value: value });
+    }
+
+    function setFrameHeight(height) {
+      sendMessage("streamlit:setFrameHeight", { height: height });
+    }
+
+    // Notify Streamlit when component iframe is mounted
+    window.addEventListener("load", function () {
+      sendMessage("streamlit:componentReady", { apiVersion: 1 });
+      setFrameHeight(0);
+    });
+
+    // Listen for render messages from Streamlit Python
+    window.addEventListener("message", function (event) {
+      if (!event.data || event.data.type !== "streamlit:render") {
+        return;
+      }
+
+      setFrameHeight(0);
+      var args = event.data.args || {};
+      var action = args.action || "sync";
+      var storagePrefix = "amztools_";
+      var trackedKeys = args.read_keys || [
+        "sp_client_id",
+        "sp_client_secret",
+        "sp_refresh_token",
+        "cf_account_id",
+        "cf_database_id",
+        "cf_api_token",
+        "wholesaler_company_name"
+      ];
+
+      // 1. CLEAR ACTION
+      if (action === "clear") {
+        trackedKeys.forEach(function (k) {
+          try {
+            sessionStorage.removeItem(storagePrefix + k);
+          } catch (e) {}
+        });
+        setComponentValue({ cleared: true, values: {} });
+        return;
+      }
+
+      // 2. SAVE ACTION (Persist non-empty values into sessionStorage)
+      if (args.save_keys && typeof args.save_keys === "object") {
+        for (var key in args.save_keys) {
+          var val = args.save_keys[key];
+          try {
+            if (val !== undefined && val !== null && String(val).trim() !== "") {
+              sessionStorage.setItem(storagePrefix + key, String(val).trim());
+            } else if (val === "") {
+              sessionStorage.removeItem(storagePrefix + key);
+            }
+          } catch (e) {}
+        }
+      }
+
+      // 3. READ ACTION (Fetch current values from sessionStorage)
+      var currentValues = {};
+      trackedKeys.forEach(function (k) {
+        try {
+          var val = sessionStorage.getItem(storagePrefix + k);
+          if (val !== null && val !== undefined && val !== "") {
+            currentValues[k] = val;
+          }
+        } catch (e) {}
+      });
+
+      setComponentValue({ cleared: false, values: currentValues });
+    });
+  </script>
+</head>
+<body style="margin: 0; padding: 0; overflow: hidden; display: none;"></body>
+</html>

@@ -81,25 +81,16 @@ def render_uploader_ui():
     client = CloudflareD1Client(active_config)
 
     # Credential action buttons
-    c_btn1, c_btn2 = st.sidebar.columns(2)
-    with c_btn1:
-        if st.button("🧪 Test D1", key="test_d1_conn_btn", use_container_width=True):
-            if not active_config.is_valid():
-                st.sidebar.warning("Please provide Account ID, Database UUID, and API Token.")
+    if st.sidebar.button("🧪 Test D1 Connection", key="test_d1_conn_btn", use_container_width=True):
+        if not active_config.is_valid():
+            st.sidebar.warning("Please provide Account ID, Database UUID, and API Token.")
+        else:
+            with st.sidebar.spinner("Testing connection..."):
+                success, msg = client.test_connection()
+            if success:
+                st.sidebar.success(msg)
             else:
-                with st.sidebar.spinner("Testing connection..."):
-                    success, msg = client.test_connection()
-                if success:
-                    st.sidebar.success(msg)
-                else:
-                    st.sidebar.error(msg)
-
-    with c_btn2:
-        if st.button("💾 Save .env", key="save_d1_env_btn", use_container_width=True):
-            if active_config.save_to_env():
-                st.sidebar.success("Credentials saved to .env!")
-            else:
-                st.sidebar.error("Failed saving to .env.")
+                st.sidebar.error(msg)
 
     with st.sidebar.expander("🛠️ Database Maintenance", expanded=False):
         if st.button("Initialize Table Schema", key="init_schema_btn", use_container_width=True):

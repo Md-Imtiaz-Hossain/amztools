@@ -18,10 +18,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 try:
-    from dotenv import load_dotenv, set_key
+    from dotenv import load_dotenv
 except ImportError:
     load_dotenv = None
-    set_key = None
 
 
 @dataclass
@@ -61,57 +60,7 @@ class CloudflareD1Config:
             timeout_seconds=int(os.environ.get("CLOUDFLARE_D1_TIMEOUT", 30)),
         )
 
-    def save_to_env(self, env_path: str = ".env") -> bool:
-        """
-        Persist credentials into a .env file for future sessions.
-        """
-        try:
-            if not os.path.exists(env_path):
-                with open(env_path, "w", encoding="utf-8") as f:
-                    f.write("# Cloudflare D1 Configuration\n")
 
-            if set_key:
-                set_key(env_path, "CLOUDFLARE_ACCOUNT_ID", self.account_id)
-                set_key(env_path, "CLOUDFLARE_DATABASE_ID", self.database_id)
-                set_key(env_path, "CLOUDFLARE_API_TOKEN", self.api_token)
-                set_key(env_path, "CLOUDFLARE_D1_BATCH_SIZE", str(self.batch_size))
-                return True
-            else:
-                # Fallback manual write
-                lines = []
-                if os.path.exists(env_path):
-                    with open(env_path, "r", encoding="utf-8") as f:
-                        lines = f.readlines()
-                
-                keys_to_update = {
-                    "CLOUDFLARE_ACCOUNT_ID": self.account_id,
-                    "CLOUDFLARE_DATABASE_ID": self.database_id,
-                    "CLOUDFLARE_API_TOKEN": self.api_token,
-                    "CLOUDFLARE_D1_BATCH_SIZE": str(self.batch_size),
-                }
-
-                new_lines = []
-                updated_keys = set()
-                for line in lines:
-                    matched = False
-                    for k, v in keys_to_update.items():
-                        if line.startswith(f"{k}="):
-                            new_lines.append(f"{k}={v}\n")
-                            updated_keys.add(k)
-                            matched = True
-                            break
-                    if not matched:
-                        new_lines.append(line)
-
-                for k, v in keys_to_update.items():
-                    if k not in updated_keys:
-                        new_lines.append(f"{k}={v}\n")
-
-                with open(env_path, "w", encoding="utf-8") as f:
-                    f.writelines(new_lines)
-                return True
-        except Exception:
-            return False
 
     @property
     def query_endpoint_url(self) -> str:

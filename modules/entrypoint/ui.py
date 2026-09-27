@@ -24,6 +24,7 @@ Planned Workflow:
 
 import streamlit as st
 from .router import AppRouter, ModuleView
+from .session_bridge import sync_session_credentials, clear_all_credentials
 
 # Lazy / conditional imports for module UI renderers
 # (Each module implements its own self-contained Streamlit UI view)
@@ -42,10 +43,13 @@ def render_entrypoint_app():
         initial_sidebar_state="expanded",
     )
 
-    # 2. Initialize Navigation Router
+    # 2. Ephemeral Browser Session Sync (Zero disk writes, purged on tab close)
+    sync_session_credentials()
+
+    # 3. Initialize Navigation Router
     router = AppRouter(session_state=st.session_state)
 
-    # 3. Render Top Navigation Bar & Sidebar
+    # 4. Render Top Navigation Bar & Sidebar
     st.sidebar.title("🚀 Amazon Wholesale Suite")
     st.sidebar.markdown(
         "**Multi-Module Pipeline**\n"
@@ -76,6 +80,18 @@ def render_entrypoint_app():
         current_module = ModuleView(selected_module_key)
 
     st.sidebar.markdown("---")
+    st.sidebar.markdown("🔒 **Browser Session Storage**")
+    st.sidebar.caption("Ephemeral tab storage active. Keys exist only in this browser tab and vanish when closed. Zero disk writes.")
+    if st.sidebar.button(
+        "🧹 Wipe All Keys",
+        key="global_wipe_keys_btn",
+        use_container_width=True,
+        help="Immediately purge all API credentials and database tokens from browser memory",
+    ):
+        clear_all_credentials()
+        st.sidebar.success("All credentials erased!")
+        st.rerun()
+
     st.sidebar.caption("v2.0.0 • Cloudflare D1 + Amazon SP-API Ready")
 
     # 4. Dispatch to Selected Module View
