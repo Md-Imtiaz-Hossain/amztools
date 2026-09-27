@@ -32,20 +32,58 @@ An enterprise-grade wholesale catalog analysis and unit-economics decision engin
 
 ---
 
-## 🏗️ Project Architecture
+## 🏗️ Multi-Module Architecture
+
+The project is structured into four decoupled, extensible modules:
 
 ```
 amztools/
-├── streamlit_app.py            # Streamlit web interface, dashboard metrics, and interactive filters
-├── sp_api_client.py            # Amazon SP-API client (Catalog v2022-04-01, Pricing), scraping fallback, and demo engine
-├── analytics.py                # FBA fee engine, referral tier rules, sales velocity curves, and comprehensive financials
-├── excel_exporter.py           # OpenPyXL workbook generator matching the Target formatted specification
-├── file_loader.py              # Safe multi-encoding file loader for CSV and Excel supplier files
-├── config.py                   # Marketplace region definitions and configuration mappings
-├── sample_supplier_catalog.csv # Ready-to-run 12-item sample catalog for instant testing
-├── Target_Data_and_format.xlsx # Reference spreadsheet defining the target 52-column layout and formats
-└── requirements.txt            # Project dependencies
+├── streamlit_app.py            # Streamlit root entrypoint (Module 1 launcher)
+├── main.py                     # CLI & programmatic launcher
+├── requirements.txt            # Annotated dependencies
+├── .env.example                # SP-API & Cloudflare D1 environment template
+├── sample_supplier_catalog.csv # Sample catalog for testing
+├── Target_Data_and_format.xlsx # Reference spreadsheet defining the 52-column layout
+│
+├── modules/
+│   ├── __init__.py             # Multi-module package registry
+│   │
+│   ├── entrypoint/             # ================= MODULE 1: ENTRYPOINT =================
+│   │   ├── __init__.py         # Module 1 exports
+│   │   ├── router.py           # Application state router & cross-module dispatcher
+│   │   └── ui.py               # Streamlit top navigation & multi-module layout frame
+│   │
+│   ├── analyzer/               # ================= MODULE 2: ANALYZE & PREPARE DATA =================
+│   │   ├── __init__.py         # Module 2 exports
+│   │   ├── config.py           # Amazon SP-API marketplaces & regional endpoints
+│   │   ├── file_loader.py      # Supplier catalog ingestion (CSV/Excel)
+│   │   ├── sp_api_client.py    # Amazon SP-API live client & Demo simulation engine
+│   │   ├── analytics.py        # Unit economics: FBA fees, referral fees, BSR velocity, margins
+│   │   ├── excel_exporter.py   # Target 52-column styled Excel workbook generator
+│   │   └── ui.py               # Streamlit catalog analysis & export interface
+│   │
+│   ├── uploader/               # ================= MODULE 3: UPLOAD TO CLOUDFLARE D1 =================
+│   │   ├── __init__.py         # Module 3 exports
+│   │   ├── config.py           # Cloudflare D1 credentials & batch settings
+│   │   ├── schema.sql          # Cloudflare D1 SQLite DDL schema (52 fields + indexes)
+│   │   ├── d1_client.py        # Cloudflare D1 HTTP REST API client
+│   │   ├── file_parser.py      # Module 2 output validator & row sanitizer
+│   │   ├── uploader_service.py # Batch ingestion pipeline & parameterized upsert engine
+│   │   └── ui.py               # Streamlit database upload interface
+│   │
+│   └── crud/                   # ================= MODULE 4: DATABASE CRUD & VIEWER =================
+│       ├── __init__.py         # Module 4 exports
+│       ├── models.py           # Strongly-typed product entities & filter criteria
+│       ├── crud_service.py     # D1 SQL CRUD engine (Fetch, Insert, Update, Delete)
+│       └── ui.py               # Streamlit interactive database browser & editor
 ```
+
+### Module Implementation Status:
+1. **Module 1 (Entrypoint)**: Main navigation hub and cross-module routing. [✅ Complete]
+2. **Module 2 (Analyze & Prepare Data)**: Supplier catalog analysis, Amazon SP-API/Demo matching, and Target Excel export. [✅ Complete]
+3. **Module 3 (Data Upload to Database)**: Cloudflare D1 REST client, batch upsert pipeline, and schema synchronization. [✅ Complete]
+4. **Module 4 (Database CRUD Operation)**: Cloudflare D1 query engine, KPI dashboard, product editor, and lead search. [✅ Complete]
+
 
 ---
 

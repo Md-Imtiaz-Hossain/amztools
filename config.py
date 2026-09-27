@@ -1,12 +1,9 @@
-from sp_api.base import Marketplaces
+"""
+Backward Compatibility Layer: config.py
+=======================================
+Redirects to the new modular package: modules.analyzer.config
+"""
 
-MARKETPLACE_MAP = {
-    "US": Marketplaces.US,
-    "UK": Marketplaces.UK,
-    "DE": Marketplaces.DE,
-    "CA": Marketplaces.CA,
-    "FR": Marketplaces.FR,
-    "IT": Marketplaces.IT,
-    "ES": Marketplaces.ES,
-    "JP": Marketplaces.JP,
-}
+from modules.analyzer.config import MARKETPLACE_MAP, Marketplaces
+
+__all__ = ["MARKETPLACE_MAP", "Marketplaces"]

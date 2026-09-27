@@ -1,8 +1,13 @@
-streamlit
-pandas
+# Module 1 & Web UI
+streamlit>=1.30.0
 
-numpy
-plotly
-openpyxl
-requests
-python-amazon-sp-api
+# Module 2: Analyze & Prepare Data
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.18.0
+openpyxl>=3.1.2
+python-amazon-sp-api>=1.5.0
+
+# Module 3 & 4: Cloudflare D1 REST Client & CRUD
+requests>=2.31.0
+python-dotenv>=1.0.0
