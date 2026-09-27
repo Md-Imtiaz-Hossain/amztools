@@ -28,10 +28,9 @@ def render_crud_ui():
     """
     Renders the complete user interface for Module 4: Database CRUD Operations & Data Viewer.
     """
-    st.header("🗄️ Module 4: Database CRUD Operations & Data Viewer")
+    st.header("🗄️ Module 4: Database")
     st.markdown(
-        "Inspect, filter, edit, and manage wholesale catalog leads stored in your **Cloudflare D1 Database**. "
-        "Filter by profitability, update product details, or export database subsets in Target format."
+        "**Cloudflare D1 Database**"
     )
 
     # --- SIDEBAR CONFIGURATION ---

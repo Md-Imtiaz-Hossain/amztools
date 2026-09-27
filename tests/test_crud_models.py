@@ -23,6 +23,7 @@ class TestRouterAndModels(unittest.TestCase):
         router.navigate_to(ModuleView.CRUD)
         self.assertEqual(router.get_active_module(), ModuleView.CRUD)
 
+
     def test_product_model_from_d1_row(self):
         row_dict = {
             "id": 1,

@@ -36,6 +36,29 @@ class TestExcelExporter(unittest.TestCase):
         self.assertEqual(len(header_vals), len(TARGET_COLUMNS))
         self.assertEqual(header_vals[0], TARGET_COLUMNS[0])
 
+    def test_quick_search_export_to_excel(self):
+        from modules.analyzer.sp_api_client import fetch_amazon_item_data, build_full_target_row
+        item = fetch_amazon_item_data(
+            upc="794437466810",
+            asin="B01N1S89M0",
+            title="SheaMoisture Daily Hydration Conditioner 13 oz",
+            cost=5.25,
+            credentials={},
+            marketplace="US",
+            is_demo=True,
+        )
+        row = build_full_target_row(item_data=item, cost=5.25, wholesaler_company_name="Acme Wholesale Supplies LLC")
+        df = pd.DataFrame([row])
+        excel_bytes = export_to_target_excel(df)
+        self.assertIsInstance(excel_bytes, bytes)
+        self.assertGreater(len(excel_bytes), 1000)
+
+        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+        ws = wb.active
+        self.assertEqual(ws.max_row, 2)  # Header row + 1 data row
+        self.assertEqual(ws.max_column, len(TARGET_COLUMNS))  # Exact target schema columns
+
 
 if __name__ == "__main__":
     unittest.main()
+

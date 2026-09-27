@@ -352,17 +352,26 @@ def fetch_amazon_page_details(asin):
     }
 
 
-def _generate_demo_data(clean_id, id_type, supplier_cost=0.0):
+def _generate_demo_data(
+    clean_id,
+    id_type,
+    supplier_cost=0.0,
+    user_title=None,
+    user_upc=None,
+    user_asin=None,
+):
     """
     Generate realistic product responses for Demo / Simulation mode matching
     all target columns.
     """
+    prod_id = user_upc if user_upc else (user_asin if user_asin else clean_id)
+
     if clean_id in KNOWN_DEMO_PRODUCTS:
         p = KNOWN_DEMO_PRODUCTS[clean_id]
-        asin = p["asin"]
+        asin = user_asin if user_asin else p["asin"]
         parent_asin = p["parent_asin"]
         brand = p["brand"]
-        title = p["title"]
+        title = user_title if user_title else p["title"]
         pkg_qty = p["pkg_qty"]
         cat = p["category"]
         sales_rank = p["sales_rank"]
@@ -399,13 +408,16 @@ def _generate_demo_data(clean_id, id_type, supplier_cost=0.0):
         # Deterministic simulation based on hash
         h = int(hashlib.md5(clean_id.encode("utf-8")).hexdigest(), 16)
         brand = DEMO_BRANDS[h % len(DEMO_BRANDS)]
-        asin = clean_id if id_type == "ASIN" else ("B0" + hashlib.md5(clean_id.encode()).hexdigest()[:8].upper())
+        asin = user_asin if user_asin else (clean_id if id_type == "ASIN" else ("B0" + hashlib.md5(clean_id.encode()).hexdigest()[:8].upper()))
         parent_asin = ("B0" + hashlib.md5((clean_id + "parent").encode()).hexdigest()[:8].upper()) if (h % 3 == 0) else ""
         cat_pair = DEMO_CATEGORIES_MAP[h % len(DEMO_CATEGORIES_MAP)]
         cat = cat_pair[0]
         sub_category = cat_pair[1][h % len(cat_pair[1])]
 
-        title = f"{brand} Professional Wholesale Catalog Item (SKU-{clean_id[-4:]})"
+        if user_title:
+            title = user_title
+        else:
+            title = f"{brand} Professional Wholesale Catalog Item (SKU-{clean_id[-4:]})"
         pkg_qty = 1 if (h % 5 != 0) else (h % 4 + 1)
         
         has_offers = (h % 10) != 0  # 90% have offers
@@ -485,7 +497,7 @@ def _generate_demo_data(clean_id, id_type, supplier_cost=0.0):
         "asin": asin,
         "parent_asin": parent_asin,
         "favorite": "False",
-        "product_id": clean_id,
+        "product_id": prod_id,
         "brand": brand,
         "brand_restriction": brand_restr,
         "selling_restriction": sell_restr,
@@ -526,19 +538,51 @@ def _generate_demo_data(clean_id, id_type, supplier_cost=0.0):
     }
 
 
-def fetch_amazon_item_data(raw_identifier, credentials, marketplace, is_demo=False, cost=0.0):
+def fetch_amazon_item_data(
+    raw_identifier=None,
+    credentials=None,
+    marketplace=None,
+    is_demo=False,
+    cost=0.0,
+    asin=None,
+    upc=None,
+    title=None,
+):
     """
     Query Amazon SP-API for a product's full 52-column dataset.
     Supports both Live SP-API (Catalog v2022-04-01 + Pricing API) and Demo Simulation Mode.
+    Can be invoked with raw_identifier (bulk mode) or with explicit asin, upc, title parameters (quick search mode).
     """
-    clean_id, id_type = clean_identifier(raw_identifier)
+    user_asin = str(asin).strip().upper() if asin and str(asin).strip() else ""
+    user_upc = str(upc).strip() if upc and str(upc).strip() else ""
+    user_title = str(title).strip() if title and str(title).strip() else ""
+
+    # Determine identifier priority
+    if user_asin:
+        clean_id = user_asin
+        id_type = "ASIN"
+        prod_id = user_upc if user_upc else user_asin
+    elif user_upc:
+        clean_id, id_type = clean_identifier(user_upc)
+        prod_id = clean_id
+    elif raw_identifier:
+        clean_id, id_type = clean_identifier(raw_identifier)
+        prod_id = clean_id
+    elif user_title:
+        clean_id = user_title
+        id_type = "KEYWORDS"
+        prod_id = "KEYWORD_SEARCH"
+    else:
+        clean_id = ""
+        id_type = "UPC"
+        prod_id = ""
 
     if not clean_id:
         return {
             "asin": "INVALID_ID",
             "parent_asin": "",
             "favorite": "False",
-            "product_id": raw_identifier,
+            "product_id": raw_identifier or user_upc or user_asin or user_title or "",
             "brand": "N/A",
             "brand_restriction": "False",
             "selling_restriction": "not eligible",
@@ -575,7 +619,14 @@ def fetch_amazon_item_data(raw_identifier, credentials, marketplace, is_demo=Fal
         }
 
     if is_demo:
-        return _generate_demo_data(clean_id, id_type, supplier_cost=cost)
+        return _generate_demo_data(
+            clean_id,
+            id_type,
+            supplier_cost=cost,
+            user_title=user_title,
+            user_upc=user_upc,
+            user_asin=user_asin,
+        )
 
     # --- LIVE AMAZON SP-API ---
     marketplace_id = (
@@ -586,7 +637,7 @@ def fetch_amazon_item_data(raw_identifier, credentials, marketplace, is_demo=Fal
 
     asin = "NOT_FOUND"
     parent_asin = ""
-    title = "Product not found on Amazon"
+    title = user_title if user_title else "Product not found on Amazon"
     brand = "N/A"
     mfg = ""
     color = ""
@@ -622,6 +673,15 @@ def fetch_amazon_item_data(raw_identifier, credentials, marketplace, is_demo=Fal
                 includedData=included_data,
             )
             item = search_res.payload or {}
+        elif id_type == "KEYWORDS":
+            search_res = catalog_api.search_catalog_items(
+                keywords=[clean_id],
+                marketplaceIds=[marketplace_id],
+                includedData=included_data,
+            )
+            payload_data = search_res.payload or {}
+            items = payload_data.get("items", [])
+            item = items[0] if items else None
         else:
             search_res = catalog_api.search_catalog_items(
                 identifiers=[clean_id],
@@ -638,12 +698,12 @@ def fetch_amazon_item_data(raw_identifier, credentials, marketplace, is_demo=Fal
                 "asin": "NOT_FOUND",
                 "parent_asin": "",
                 "favorite": "False",
-                "product_id": clean_id,
+                "product_id": prod_id,
                 "brand": "N/A",
                 "brand_restriction": "False",
                 "selling_restriction": "not eligible",
                 "selling_restriction_link": None,
-                "title": "Product not found on Amazon",
+                "title": user_title if user_title else "Product not found on Amazon",
                 "package_quantity": 1,
                 "amazon_link": "",
                 "current_est_sales": 5,
@@ -912,7 +972,7 @@ def fetch_amazon_item_data(raw_identifier, credentials, marketplace, is_demo=Fal
         "asin": asin,
         "parent_asin": parent_asin,
         "favorite": "False",
-        "product_id": clean_id,
+        "product_id": prod_id if prod_id else item.get("asin", clean_id),
         "brand": brand,
         "brand_restriction": "False",
         "selling_restriction": selling_restr,
