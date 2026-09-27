@@ -12,8 +12,7 @@ Responsibilities:
     3. Type Sanitization: Cleans currency strings, converts floats, handles missing values (NaN -> None).
 """
 
-from typing import Any, Dict, List, Optional, Tuple, Union
-import math
+from typing import Any, Dict, List, Union
 import re
 import datetime
 import pandas as pd

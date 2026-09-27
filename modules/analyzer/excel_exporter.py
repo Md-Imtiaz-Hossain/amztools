@@ -12,16 +12,12 @@ Purpose:
 """
 
 import io
-import datetime
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
-try:
-    from .sp_api_client import TARGET_COLUMNS
-except (ImportError, ValueError):
-    from sp_api_client import TARGET_COLUMNS
+from .sp_api_client import TARGET_COLUMNS
 
 # Column specific number formats matching Target specifications
 COLUMN_NUMBER_FORMATS = {

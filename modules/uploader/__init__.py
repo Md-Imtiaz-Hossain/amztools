@@ -19,6 +19,7 @@ Components:
 from .config import CloudflareD1Config
 from .d1_client import CloudflareD1Client
 from .file_parser import parse_and_validate_analysis_file
+from .uploader_service import D1UploaderService
 try:
     from .ui import render_uploader_ui
 except ImportError:

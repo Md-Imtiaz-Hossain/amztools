@@ -58,6 +58,7 @@ amztools/
 │   │   ├── config.py           # Amazon SP-API marketplaces & regional endpoints
 │   │   ├── file_loader.py      # Supplier catalog ingestion (CSV/Excel)
 │   │   ├── sp_api_client.py    # Amazon SP-API live client & Demo simulation engine
+│   │   ├── demo_data.py        # Realistic simulation fixtures & category datasets
 │   │   ├── analytics.py        # Unit economics: FBA fees, referral fees, BSR velocity, margins
 │   │   ├── excel_exporter.py   # Target 52-column styled Excel workbook generator
 │   │   └── ui.py               # Streamlit catalog analysis & export interface
@@ -76,6 +77,14 @@ amztools/
 │       ├── models.py           # Strongly-typed product entities & filter criteria
 │       ├── crud_service.py     # D1 SQL CRUD engine (Fetch, Insert, Update, Delete)
 │       └── ui.py               # Streamlit interactive database browser & editor
+│
+└── tests/                      # Automated unit test suite
+    ├── test_analytics.py       # FBA fees, referral fees, BSR velocity, profit math
+    ├── test_file_loader.py     # CSV/Excel parsing and barcode leading zero retention
+    ├── test_sp_api_client.py   # SP-API identifiers and simulation engine
+    ├── test_excel_exporter.py  # 52-column Target format Excel generation
+    ├── test_uploader.py        # D1 ingestion parsing and validation
+    └── test_crud_models.py     # Router navigation and D1 product data models
 ```
 
 ### Module Implementation Status:
@@ -181,11 +190,21 @@ To use live Amazon data, register an Amazon Selling Partner developer account an
 
 ## 🛠️ Testing & Verification
 
-Run the test suite to verify calculation logic and Excel generation:
+Run the automated test suite covering all modules:
+
+```bash
+# Run all unit and integration tests
+python -m unittest discover tests
+```
+
+Or verify that all module packages load cleanly:
 
 ```bash
 python -c "
-import config, file_loader, analytics, excel_exporter, sp_api_client
+from modules.entrypoint import AppRouter
+from modules.analyzer import load_supplier_file, calculate_comprehensive_financials, export_to_target_excel
+from modules.uploader import CloudflareD1Client, D1UploaderService
+from modules.crud import D1CrudService
 print('All modules loaded successfully!')
 "
 ```

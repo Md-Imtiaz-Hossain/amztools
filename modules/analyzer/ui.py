@@ -15,6 +15,7 @@ Purpose:
 """
 
 import datetime
+import os
 import pandas as pd
 import streamlit as st
 
@@ -131,22 +132,46 @@ def render_analyzer_ui():
 
     # --- MAIN VIEW: FILE INGESTION ---
     st.subheader("1. Ingest Supplier Wholesale Catalog")
-    uploaded_file = st.file_uploader(
-        "Upload Supplier File (.csv, .xlsx, .xls)",
-        type=["csv", "xlsx", "xls"],
-        help="Upload a supplier wholesale price catalog. Ensure it contains a column for UPC/EAN/ASIN and Cost.",
-        key="analyzer_file_uploader",
-    )
+    u_col1, u_col2 = st.columns([3, 1])
 
-    if uploaded_file is None:
-        st.info("👋 Upload a CSV or Excel price list to get started. You can also test with demo data.")
-        return
+    with u_col1:
+        uploaded_file = st.file_uploader(
+            "Upload Supplier File (.csv, .xlsx, .xls)",
+            type=["csv", "xlsx", "xls"],
+            help="Upload a supplier wholesale price catalog. Ensure it contains a column for UPC/EAN/ASIN and Cost.",
+            key="analyzer_file_uploader",
+        )
 
-    try:
-        df = load_supplier_file(uploaded_file)
-        st.success(f"Loaded `{uploaded_file.name}` successfully ({len(df)} rows detected).")
-    except Exception as e:
-        st.error(f"Error loading file: {e}")
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sample_file_path = os.path.join(project_root, "sample_supplier_catalog.csv")
+
+    with u_col2:
+        st.write("")
+        st.write("")
+        if os.path.exists(sample_file_path):
+            if st.button("📄 Load Sample Catalog", key="load_sample_cat_btn", help="Load the built-in sample catalog with 13 products"):
+                st.session_state["use_sample_catalog"] = True
+                st.session_state["wholesaler_company_name"] = st.session_state.get("wholesaler_company_name") or "Acme Wholesale Supplies LLC"
+                st.rerun()
+
+    df = None
+    if uploaded_file is not None:
+        st.session_state["use_sample_catalog"] = False
+        try:
+            df = load_supplier_file(uploaded_file)
+            st.success(f"Loaded `{uploaded_file.name}` successfully ({len(df)} rows detected).")
+        except Exception as e:
+            st.error(f"Error loading file: {e}")
+            return
+    elif st.session_state.get("use_sample_catalog") and os.path.exists(sample_file_path):
+        try:
+            df = load_supplier_file(sample_file_path)
+            st.success(f"Loaded built-in `sample_supplier_catalog.csv` successfully ({len(df)} sample rows ready for analysis).")
+        except Exception as e:
+            st.error(f"Error loading sample catalog: {e}")
+            return
+    else:
+        st.info("👋 Upload a CSV or Excel price list to get started, or click **📄 Load Sample Catalog** above to test immediately.")
         return
 
     with st.expander("👁️ Preview Raw Uploaded File (First 5 Rows)", expanded=False):

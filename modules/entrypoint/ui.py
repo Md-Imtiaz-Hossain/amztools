@@ -33,12 +33,6 @@ def render_entrypoint_app():
     """
     Main application entrypoint rendering function.
     Coordinates page setup, sidebar navigation, and module dispatching.
-
-    # TODO (Module 1 Phase):
-    # - Configure global page settings (st.set_page_config)
-    # - Render global module switcher in sidebar
-    # - Display workflow breadcrumbs and persistent notifications
-    # - Delegate rendering to the selected module's render function
     """
     # 1. Global Page Configuration
     st.set_page_config(

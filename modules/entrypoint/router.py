@@ -61,11 +61,6 @@ class AppRouter:
     def _init_router_state(self) -> None:
         """
         Initialize default routing parameters in the session state if not already set.
-
-        # TODO (Module 1 Phase):
-        # - Set default active view to ModuleView.ANALYZER
-        # - Initialize cross-module transfer buffer (e.g., 'latest_analyzed_file')
-        # - Track user notifications and breadcrumb history
         """
         if "active_module" not in self.session_state:
             self.session_state["active_module"] = ModuleView.ANALYZER.value
@@ -89,11 +84,6 @@ class AppRouter:
 
         Args:
             module (ModuleView): The target module to navigate to.
-
-        # TODO (Module 1 Phase):
-        # - Update session state 'active_module'
-        # - Trigger rerun if running inside Streamlit context
-        # - Log navigation transition for analytics/debugging
         """
         self.session_state["active_module"] = module.value
 
@@ -104,9 +94,5 @@ class AppRouter:
 
         Args:
             dataframe_or_filepath: Pandas DataFrame or path to exported Excel/CSV file.
-
-        # TODO (Module 1 Phase):
-        # - Save output payload in session_state['pending_d1_upload']
-        # - Automatically redirect active view to ModuleView.UPLOADER
         """
         self.session_state["pending_d1_upload"] = dataframe_or_filepath

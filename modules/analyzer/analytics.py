@@ -11,7 +11,6 @@ Purpose:
 """
 
 import re
-import math
 
 
 def clean_cost(val):
@@ -311,23 +310,3 @@ def calculate_comprehensive_financials(
         "ROI": roi,
         "Break Even Sell Price": break_even,
     }
-
-
-# Retain backwards compatibility with old function signature
-def calculate_financials(
-    cost,
-    sell_price,
-    estimated_fba_fees=4.50,
-    referral_fee_pct=15.0,
-    prep_fee=0.0,
-):
-    fin = calculate_comprehensive_financials(
-        cost=cost,
-        sell_price=sell_price,
-        estimated_fba_fees=estimated_fba_fees,
-        referral_fee_pct=referral_fee_pct,
-        inbound_placement_fee=prep_fee,
-    )
-    if fin["Profit"] is None:
-        return 0.0, 0.0, 0.0, round(float(cost or 0.0) + float(estimated_fba_fees or 0.0), 2)
-    return fin["Profit"], round(fin["ROI"] * 100.0, 2), round(fin["Margin"] * 100.0, 2), fin["Break Even Sell Price"]
