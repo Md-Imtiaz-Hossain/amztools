@@ -235,6 +235,14 @@ class CloudflareD1Client:
             for s in statements_to_run:
                 self.execute_query(s, [])
                 executed_count += 1
+
+            # Migration fallback for existing tables: add analyzing_software_name if not already present
+            try:
+                self.execute_query("ALTER TABLE wholesale_products ADD COLUMN analyzing_software_name TEXT DEFAULT 'InternalAMZ';", [])
+            except Exception:
+                pass
+
             return True, f"✅ Database schema initialized! Executed {executed_count} DDL statements (tables & indexes created)."
         except Exception as e:
             return False, f"Failed initializing schema: {e}"
+

@@ -76,9 +76,11 @@ class TestSPApiClient(unittest.TestCase):
         )
         self.assertEqual(row["ASIN"], "B0BDHWDR12")
         self.assertEqual(row["Wholesaller Company Name"], "Acme Wholesale")
+        self.assertEqual(row["Analyzing Software Name"], "InternalAMZ")
         # Ensure all required target columns are present
         for col in TARGET_COLUMNS:
             self.assertIn(col, row)
+
 
     def test_quick_search_by_asin(self):
         """Quick Search with only ASIN and Wholesale Price."""

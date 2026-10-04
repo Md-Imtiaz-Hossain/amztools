@@ -74,6 +74,7 @@ COLUMN_WIDTHS = {
     "About this item": 24.0,
     "Customer Reviews": 20.0,
     "Wholesaller Company Name": 18.0,
+    "Analyzing Software Name": 18.0,
     "Category": 16.0,
     "Sub Category": 20.0,
     "Brand": 14.0,
@@ -193,6 +194,7 @@ CENTER_ALIGNED_COLUMNS = {
     "Keepa",
     "CamelCC",
     "Last Run",
+    "Analyzing Software Name",
 }
 
 
@@ -256,11 +258,30 @@ def export_to_target_excel(rows_or_df, output_path=None):
         col_letter = get_column_letter(col_idx)
         ws.column_dimensions[col_letter].width = COLUMN_WIDTHS.get(col_name, DEFAULT_COLUMN_WIDTH)
 
-    # Convert DataFrame to records if passed
+    # Convert DataFrame to records if passed, ensuring Analyzing Software Name is filled with "InternalAMZ"
     if hasattr(rows_or_df, "to_dict"):
-        records = rows_or_df.to_dict(orient="records")
+        df_copy = rows_or_df.copy()
+        if "Analyzing Software Name" not in df_copy.columns:
+            df_copy["Analyzing Software Name"] = "InternalAMZ"
+        else:
+            df_copy["Analyzing Software Name"] = (
+                df_copy["Analyzing Software Name"]
+                .fillna("InternalAMZ")
+                .replace("", "InternalAMZ")
+            )
+        records = df_copy.to_dict(orient="records")
     else:
-        records = list(rows_or_df)
+        records = []
+        for r in rows_or_df:
+            r_copy = dict(r)
+            if not r_copy.get("Analyzing Software Name"):
+                r_copy["Analyzing Software Name"] = "InternalAMZ"
+            records.append(r_copy)
+
+    # Ensure all records have "Analyzing Software Name" populated with "InternalAMZ"
+    for r in records:
+        if not r.get("Analyzing Software Name") or (isinstance(r.get("Analyzing Software Name"), float) and pd.isna(r.get("Analyzing Software Name"))):
+            r["Analyzing Software Name"] = "InternalAMZ"
 
     # 2. Write Data Rows (each strictly 20pt height = height of 1 line)
     for row_idx, record in enumerate(records, start=2):
@@ -269,6 +290,10 @@ def export_to_target_excel(rows_or_df, output_path=None):
 
         for col_idx, col_name in enumerate(TARGET_COLUMNS, 1):
             val = record.get(col_name, None)
+            if col_name == "Analyzing Software Name" and (
+                val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip().lower() in ("nan", "none", "")
+            ):
+                val = "InternalAMZ"
             cell = ws.cell(row=row_idx, column=col_idx)
             cell.font = data_font
             cell.border = cell_border
@@ -290,7 +315,7 @@ def export_to_target_excel(rows_or_df, output_path=None):
             else:
                 # String conversion and line-break flattening for single-line consistency
                 if col_name in (
-                    "Product ID", "ASIN", "Parent ASIN", "Wholesaller Company Name",
+                    "Product ID", "ASIN", "Parent ASIN", "Wholesaller Company Name", "Analyzing Software Name",
                     "Customer Reviews", "About this item", "Title", "Brand", "Category", "Sub Category"
                 ) and not isinstance(val, str):
                     val = str(val)

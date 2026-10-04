@@ -93,6 +93,7 @@ TARGET_COLUMNS = [
     "Customer Reviews",
     "About this item",
     "Wholesaller Company Name",
+    "Analyzing Software Name",
 ]
 
 
@@ -1142,4 +1143,5 @@ def build_full_target_row(
         "Customer Reviews": item_data.get("customer_reviews", ""),
         "About this item": item_data.get("about_this_item", ""),
         "Wholesaller Company Name": str(wholesaler_company_name or ""),
+        "Analyzing Software Name": "InternalAMZ",
     }

@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS wholesale_products (
     product_image_link_4 TEXT,
     product_image_link_5 TEXT,
 
-    -- Execution Timestamps
+    -- Execution Timestamps & Tool Tracking
+    analyzing_software_name TEXT DEFAULT 'InternalAMZ',
     last_run TEXT,                          -- Formatted run timestamp
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -110,3 +111,5 @@ CREATE INDEX IF NOT EXISTS idx_wholesale_sales_rank ON wholesale_products(sales_
 CREATE INDEX IF NOT EXISTS idx_wholesale_profit ON wholesale_products(profit);
 CREATE INDEX IF NOT EXISTS idx_wholesale_roi ON wholesale_products(roi_pct);
 CREATE INDEX IF NOT EXISTS idx_wholesale_last_run ON wholesale_products(last_run);
+CREATE INDEX IF NOT EXISTS idx_wholesale_analyzing_software ON wholesale_products(analyzing_software_name);
+

@@ -273,7 +273,7 @@ def render_crud_ui():
             item = crud_service.get_product_by_asin(inspect_asin)
             if item:
                 st.markdown(f"### {item.title or 'Product'}")
-                st.markdown(f"**ASIN**: `{item.asin}` | **UPC/Product ID**: `{item.product_id}` | **Brand**: `{item.brand}` | **Supplier**: `{item.wholesaler_company_name}`")
+                st.markdown(f"**ASIN**: `{item.asin}` | **UPC/Product ID**: `{item.product_id}` | **Brand**: `{item.brand}` | **Supplier**: `{item.wholesaler_company_name}` | **Software**: `{item.analyzing_software_name or 'InternalAMZ'}`")
                 
                 # Financials Row
                 i1, i2, i3, i4, i5 = st.columns(5)
@@ -363,6 +363,7 @@ def render_crud_ui():
                         "product_id": add_upc,
                         "cost": add_cost,
                         "sell_price": add_sell,
+                        "analyzing_software_name": "InternalAMZ",
                         "last_run": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     })
                 if ok:
@@ -378,6 +379,10 @@ def render_crud_ui():
 
         if items:
             export_df = pd.DataFrame([p.to_dict() for p in items])
+            if "Analyzing Software Name" not in export_df.columns:
+                export_df["Analyzing Software Name"] = "InternalAMZ"
+            else:
+                export_df["Analyzing Software Name"] = export_df["Analyzing Software Name"].fillna("InternalAMZ").replace("", "InternalAMZ")
             exp_col1, exp_col2 = st.columns(2)
 
             with exp_col1:

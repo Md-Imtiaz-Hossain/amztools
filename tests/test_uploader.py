@@ -34,6 +34,7 @@ class TestUploaderPipeline(unittest.TestCase):
         self.assertEqual(r["sell_price"], 249.00)
         self.assertEqual(r["profit"], 32.50)
         self.assertEqual(r["wholesaler_company_name"], "Acme Supplies")
+        self.assertEqual(r["analyzing_software_name"], "InternalAMZ")
 
     def test_validate_record_integrity(self):
         records = [

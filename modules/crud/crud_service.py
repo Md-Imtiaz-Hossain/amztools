@@ -59,9 +59,9 @@ class D1CrudService:
         if criteria.keyword and criteria.keyword.strip():
             kw = f"%{criteria.keyword.strip()}%"
             clauses.append(
-                "(asin LIKE ? OR product_id LIKE ? OR title LIKE ? OR brand LIKE ? OR wholesaler_company_name LIKE ?)"
+                "(asin LIKE ? OR product_id LIKE ? OR title LIKE ? OR brand LIKE ? OR wholesaler_company_name LIKE ? OR analyzing_software_name LIKE ?)"
             )
-            params.extend([kw, kw, kw, kw, kw])
+            params.extend([kw, kw, kw, kw, kw, kw])
 
         if criteria.category and criteria.category not in ("All Categories", "All", ""):
             clauses.append("category = ?")
@@ -161,6 +161,9 @@ class D1CrudService:
             return False, "ASIN is required."
         if not wholesaler:
             return False, "Wholesaler Company Name is required."
+
+        if not product_data.get("analyzing_software_name"):
+            product_data["analyzing_software_name"] = "InternalAMZ"
 
         # Compute unit economics if price and cost provided
         cost = float(product_data.get("cost") or 0.0)

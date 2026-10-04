@@ -80,6 +80,7 @@ class WholesaleProductModel:
     product_image_link_3: Optional[str] = None
     product_image_link_4: Optional[str] = None
     product_image_link_5: Optional[str] = None
+    analyzing_software_name: Optional[str] = "InternalAMZ"
     last_run: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -105,7 +106,7 @@ class WholesaleProductModel:
             "new_fbm_offers", "buybox_contention", "customer_reviews", "average_rating",
             "total_review_count", "is_hazmat", "keepa", "camelcc", "custom_notes",
             "product_image_link_1", "product_image_link_2", "product_image_link_3",
-            "product_image_link_4", "product_image_link_5", "last_run", "created_at", "updated_at"
+            "product_image_link_4", "product_image_link_5", "analyzing_software_name", "last_run", "created_at", "updated_at"
         }
         kwargs = {}
         extras = {}
@@ -131,6 +132,8 @@ class WholesaleProductModel:
             "product_id": self.product_id,
             "favorite": 1 if self.favorite else 0,
             "wholesaler_company_name": self.wholesaler_company_name,
+            "analyzing_software_name": self.analyzing_software_name or "InternalAMZ",
+            "Analyzing Software Name": self.analyzing_software_name or "InternalAMZ",
             "brand": self.brand,
             "title": self.title,
             "category": self.category,
@@ -158,6 +161,7 @@ class WholesaleProductModel:
             "ASIN": self.asin,
             "Product ID": self.product_id or "",
             "Wholesaler Company Name": self.wholesaler_company_name,
+            "Analyzing Software Name": self.analyzing_software_name or "InternalAMZ",
             "Brand": self.brand or "",
             "Title": self.title or "",
             "Category": self.category or "",
@@ -176,6 +180,7 @@ class WholesaleProductModel:
             "Total Review Count": self.total_review_count,
             "Last Run": self.last_run,
         }
+
 
 
 @dataclass

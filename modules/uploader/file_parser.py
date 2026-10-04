@@ -74,6 +74,8 @@ TARGET_TO_SQL_COLUMN_MAP = {
     "Total Review Count": "total_review_count",
     "Wholesaller Company Name": "wholesaler_company_name",
     "Wholesaler Company Name": "wholesaler_company_name",
+    "Analyzing Software Name": "analyzing_software_name",
+    "analyzing_software_name": "analyzing_software_name",
     "Last Run": "last_run",
     "About this item": "about_this_item",
     "Is Hazmat": "is_hazmat",
@@ -235,6 +237,9 @@ def parse_and_validate_analysis_file(
 
         if not record.get("wholesaler_company_name"):
             record["wholesaler_company_name"] = "Default Wholesale"
+
+        if not record.get("analyzing_software_name"):
+            record["analyzing_software_name"] = "InternalAMZ"
 
         # Timestamp tracking
         if not record.get("last_run"):

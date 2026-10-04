@@ -32,7 +32,7 @@ from .excel_exporter import export_to_target_excel
 
 
 DISPLAY_COLS = [
-    "ASIN", "Product ID", "Wholesaller Company Name", "Brand", "Title",
+    "ASIN", "Product ID", "Wholesaller Company Name", "Analyzing Software Name", "Brand", "Title",
     "Category", "Sales Rank", "Sub Category", "Sub Category Sales Rank",
     "Customer Reviews", "Average Rating", "Total Review Count",
     "Current Est Sales", "Estimated Monthly Revenue ($)",
@@ -41,6 +41,7 @@ DISPLAY_COLS = [
     "Profit ($)", "Margin (%)", "ROI (%)",
     "Break Even Sell Price", "Total Offers", "Selling Restriction", "About this item"
 ]
+
 
 COLUMN_CONFIG = {
     "Cost": st.column_config.NumberColumn(format="$%.2f"),
@@ -127,6 +128,15 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
 
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     with d_col1:
+        # Before generating the excel of prepared data, ensure column is filled with "InternalAMZ"
+        if "Analyzing Software Name" not in filtered_df.columns:
+            filtered_df["Analyzing Software Name"] = "InternalAMZ"
+        else:
+            filtered_df["Analyzing Software Name"] = (
+                filtered_df["Analyzing Software Name"]
+                .fillna("InternalAMZ")
+                .replace("", "InternalAMZ")
+            )
         xlsx_bytes = export_to_target_excel(filtered_df)
         st.download_button(
             label="📥 Download Target Excel (.xlsx)",
@@ -138,6 +148,14 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
         )
 
     with d_col2:
+        if "Analyzing Software Name" not in filtered_df.columns:
+            filtered_df["Analyzing Software Name"] = "InternalAMZ"
+        else:
+            filtered_df["Analyzing Software Name"] = (
+                filtered_df["Analyzing Software Name"]
+                .fillna("InternalAMZ")
+                .replace("", "InternalAMZ")
+            )
         csv_data = filtered_df.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="📄 Download Analysis CSV",
@@ -147,6 +165,7 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
             key=f"{prefix}_download_target_csv",
             use_container_width=True,
         )
+
 
     with d_col3:
         if st.button("☁️ Send Data to Module 3 (Cloudflare D1)", type="secondary", key=f"{prefix}_send_to_uploader_btn", use_container_width=True):

@@ -58,6 +58,39 @@ class TestExcelExporter(unittest.TestCase):
         self.assertEqual(ws.max_row, 2)  # Header row + 1 data row
         self.assertEqual(ws.max_column, len(TARGET_COLUMNS))  # Exact target schema columns
 
+    def test_analyzing_software_name_filled_with_internal_amz(self):
+        """Verify that Analyzing Software Name is automatically filled with 'InternalAMZ' before generating Excel."""
+        # 1. Test when the column is completely omitted in input DataFrame
+        df_without_col = pd.DataFrame([{"ASIN": "B01N1S89M0", "Cost": 10.0, "Sell Price": 25.0}])
+        excel_bytes = export_to_target_excel(df_without_col)
+        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+        ws = wb.active
+
+        headers = [cell.value for cell in ws[1]]
+        self.assertIn("Analyzing Software Name", headers)
+        col_idx = headers.index("Analyzing Software Name") + 1
+
+        val = ws.cell(row=2, column=col_idx).value
+        self.assertEqual(val, "InternalAMZ")
+
+        # 2. Test when the column exists but has None / empty values
+        df_with_empty = pd.DataFrame([{"ASIN": "B01N1S89M0", "Analyzing Software Name": None}])
+        excel_bytes2 = export_to_target_excel(df_with_empty)
+        wb2 = openpyxl.load_workbook(io.BytesIO(excel_bytes2))
+        ws2 = wb2.active
+
+        val2 = ws2.cell(row=2, column=col_idx).value
+        self.assertEqual(val2, "InternalAMZ")
+
+        # 3. Test when input is a list of dicts
+        dict_records = [{"ASIN": "B01N1S89M0"}]
+        excel_bytes3 = export_to_target_excel(dict_records)
+        wb3 = openpyxl.load_workbook(io.BytesIO(excel_bytes3))
+        ws3 = wb3.active
+        val3 = ws3.cell(row=2, column=col_idx).value
+        self.assertEqual(val3, "InternalAMZ")
+
+
 
 if __name__ == "__main__":
     unittest.main()

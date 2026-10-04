@@ -39,10 +39,14 @@ class TestRouterAndModels(unittest.TestCase):
         self.assertEqual(product.asin, "B0BDHWDR12")
         self.assertTrue(product.favorite)
         self.assertEqual(product.profit, 32.50)
+        self.assertEqual(product.analyzing_software_name, "InternalAMZ")
 
         disp = product.to_display_row()
         self.assertEqual(disp["ASIN"], "B0BDHWDR12")
         self.assertEqual(disp["Favorite"], "⭐")
+        self.assertEqual(disp["Analyzing Software Name"], "InternalAMZ")
+        self.assertEqual(product.to_dict()["Analyzing Software Name"], "InternalAMZ")
+
 
     def test_product_filter_criteria(self):
         criteria = ProductFilterCriteria(
