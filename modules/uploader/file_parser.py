@@ -257,6 +257,7 @@ def parse_and_validate_analysis_file(
 def validate_record_integrity(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Runs pre-flight validation checks on records prior to database ingestion.
+    Calculates valid counts, missing ASIN counts, and detects duplicate ASINs/variations.
 
     Args:
         records: List of parsed record dicts.
@@ -269,6 +270,8 @@ def validate_record_integrity(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     missing_asin_count = 0
     missing_wholesaler_count = 0
     sample_valid_asins = []
+    seen_asin_keys = set()
+    duplicate_asin_count = 0
 
     for r in records:
         asin = r.get("asin")
@@ -284,8 +287,16 @@ def validate_record_integrity(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         if has_asin and has_wholesaler:
             valid_count += 1
+            key = (str(asin).strip().upper(), str(wholesaler).strip())
+            if key in seen_asin_keys:
+                duplicate_asin_count += 1
+            else:
+                seen_asin_keys.add(key)
+
             if len(sample_valid_asins) < 5:
                 sample_valid_asins.append(asin)
+
+    unique_asin_count = len(seen_asin_keys)
 
     return {
         "total_records": total,
@@ -293,6 +304,8 @@ def validate_record_integrity(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "invalid_count": total - valid_count,
         "missing_asin_count": missing_asin_count,
         "missing_wholesaler_count": missing_wholesaler_count,
+        "unique_asin_count": unique_asin_count,
+        "duplicate_asin_count": duplicate_asin_count,
         "sample_valid_asins": sample_valid_asins,
         "is_ready_for_upload": valid_count > 0,
     }

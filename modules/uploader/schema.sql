@@ -94,10 +94,7 @@ CREATE TABLE IF NOT EXISTS wholesale_products (
     analyzing_software_name TEXT DEFAULT 'InternalAMZ',
     last_run TEXT,                          -- Formatted run timestamp
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-
-    -- Unique constraint: Allows idempotent UPSERT by ASIN + Wholesaler
-    UNIQUE(asin, wholesaler_company_name)
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- =====================================================================

@@ -67,6 +67,16 @@ class D1UploaderService:
         )
         return sql
 
+    def build_insert_sql(self, sample_record: Dict[str, Any]) -> str:
+        """
+        Dynamically constructs an INSERT statement tailored to Cloudflare D1 (SQLite).
+        Preserves 100% of rows from the catalog without merging duplicate ASINs or variations.
+        """
+        columns = [c for c in sample_record.keys() if c != "id"]
+        col_list_str = ", ".join(columns)
+        placeholders_str = ", ".join(["?"] * len(columns))
+        return f"INSERT INTO wholesale_products ({col_list_str}) VALUES ({placeholders_str});"
+
     def upload_dataset(
         self,
         dataset_source: Any,
@@ -75,6 +85,9 @@ class D1UploaderService:
         slot_size: int = 500,
         batch_size: Optional[int] = None,
         auto_init_schema: bool = True,
+        upload_mode: str = "insert",
+        clear_existing: str = "none",
+        wholesaler_name: Optional[str] = None,
         stop_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """
@@ -90,6 +103,11 @@ class D1UploaderService:
             slot_size: Number of records per notification slot (default: 500).
             batch_size: Sub-batch size per HTTP statement (default: 50 to respect D1 boundaries).
             auto_init_schema: If True, executes schema.sql prior to uploading.
+            upload_mode: "insert" (default, stores all 4,987 rows including variations/duplicate ASINs)
+                         or "upsert" (overwrites matching ASINs).
+            clear_existing: "none" (default, appends), "all" (wipes wholesale_products table before upload),
+                            or "wholesaler" (clears only records for wholesaler_name).
+            wholesaler_name: Optional wholesaler company name for scoped cleanup.
             stop_check: Optional callable returning True if user requested early cancellation.
 
         Returns:
@@ -154,13 +172,32 @@ class D1UploaderService:
                 "errors": ["None of the records contained a valid Amazon ASIN."],
             }
 
-        # 3. Ensure database schema exists
-        if auto_init_schema and self.client:
-            if progress_callback:
-                progress_callback(0.05, "Verifying Cloudflare D1 table schema...")
-            schema_ok, schema_msg = self.client.init_database_schema()
-            if not schema_ok:
-                logger.warning(f"Schema init note: {schema_msg}")
+        # 3. Ensure database schema exists and cleanup if requested
+        if self.client:
+            if clear_existing == "all":
+                if progress_callback:
+                    progress_callback(0.04, "Clearing entire wholesale_products table before upload...")
+                self.client.clear_table()
+            elif clear_existing == "wholesaler":
+                target_ws = wholesaler_name or valid_records[0].get("wholesaler_company_name")
+                if target_ws:
+                    if progress_callback:
+                        progress_callback(0.04, f"Clearing previous records for wholesaler '{target_ws}'...")
+                    self.client.clear_table(wholesaler_company_name=target_ws)
+
+            if auto_init_schema:
+                if progress_callback:
+                    progress_callback(0.05, "Verifying Cloudflare D1 table schema...")
+                schema_ok, schema_msg = self.client.init_database_schema()
+                if not schema_ok:
+                    logger.warning(f"Schema init note: {schema_msg}")
+
+            # If upload_mode is "insert", ensure table has no outdated UNIQUE constraint on ASIN
+            if upload_mode == "insert" and getattr(self.client, "has_unique_asin_constraint", None):
+                if self.client.has_unique_asin_constraint():
+                    if progress_callback:
+                        progress_callback(0.07, "Migrating table schema to allow duplicate ASINs...")
+                    self.client.migrate_remove_unique_constraint()
 
         # 4. Partition records into slots of 500 (with safe micro-batches per HTTP call)
         effective_slot_size = max(10, int(slot_size or 500))
@@ -172,7 +209,10 @@ class D1UploaderService:
 
         sample_record = valid_records[0]
         columns = [c for c in sample_record.keys() if c != "id"]
-        upsert_sql = self.build_upsert_sql(sample_record)
+        if upload_mode == "insert":
+            exec_sql = self.build_insert_sql(sample_record)
+        else:
+            exec_sql = self.build_upsert_sql(sample_record)
 
         uploaded_count = 0
         failed_count = 0
@@ -202,7 +242,7 @@ class D1UploaderService:
                     continue
 
                 batch_payload = [
-                    {"sql": upsert_sql, "params": [row.get(col) for col in columns]}
+                    {"sql": exec_sql, "params": [row.get(col) for col in columns]}
                     for row in chunk
                 ]
 

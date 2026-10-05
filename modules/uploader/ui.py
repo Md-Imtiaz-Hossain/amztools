@@ -114,6 +114,33 @@ def render_uploader_ui():
                 else:
                     st.error(msg)
 
+        if st.button("Migrate Schema (Allow All Duplicate ASINs)", key="migrate_schema_btn", use_container_width=True, help="Drops the old UNIQUE constraint on ASIN so that all variations and duplicate ASIN rows can be stored."):
+            if not active_config.is_valid():
+                st.warning("Please configure your Cloudflare credentials first.")
+            else:
+                with st.spinner("Migrating wholesale_products table in Cloudflare D1..."):
+                    ok, msg = client.migrate_remove_unique_constraint()
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+        st.markdown("---")
+        st.markdown("**Clear Database Table**")
+        confirm_clear = st.checkbox("Confirm wipe all data", key="confirm_clear_chk")
+        if st.button("🗑️ Clear wholesale_products Table", key="clear_table_btn", use_container_width=True, type="secondary"):
+            if not active_config.is_valid():
+                st.warning("Please configure your Cloudflare credentials first.")
+            elif not confirm_clear:
+                st.warning("Please check 'Confirm wipe all data' first.")
+            else:
+                with st.spinner("Clearing wholesale_products table..."):
+                    ok, msg = client.clear_table()
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
     st.sidebar.markdown("---")
 
     # --- MAIN VIEW: DATA SOURCE SELECTION ---
@@ -163,15 +190,25 @@ def render_uploader_ui():
             return
 
     # Metrics Row
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Records", f"{integrity['total_records']:,}")
-    m2.metric("Valid ASINs", f"{integrity['valid_count']:,}")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Total Rows in File", f"{integrity['total_records']:,}")
+    m2.metric("Valid Products to DB", f"{integrity['valid_count']:,}")
     m3.metric("Missing ASINs", f"{integrity['missing_asin_count']:,}")
-    m4.metric("Target Table", "wholesale_products")
+    m4.metric("Unique ASINs", f"{integrity.get('unique_asin_count', integrity['valid_count']):,}")
+    m5.metric("Variations / Same ASIN", f"{integrity.get('duplicate_asin_count', 0):,}")
 
     if integrity["valid_count"] == 0:
         st.error("⚠️ No valid products with recognized ASINs were found in this dataset. Please verify the file.")
         return
+
+    dup_count = integrity.get("duplicate_asin_count", 0)
+    if dup_count > 0:
+        st.info(
+            f"ℹ️ **Catalog Structure Notice**: Found **{dup_count:,} catalog items** "
+            f"sharing an ASIN with other rows (e.g. variations, different UPC barcodes, pack sizes). "
+            f"**All {integrity['valid_count']:,} records will be preserved in Cloudflare D1** "
+            f"(no rows will be merged or discarded)."
+        )
 
     effective_slot = int(st.session_state.get("cf_slot_size", slot_size))
     total_valid = integrity["valid_count"]
@@ -196,6 +233,42 @@ def render_uploader_ui():
 
     # --- UPLOAD EXECUTION ---
     st.subheader("3. Execute Cloudflare D1 Synchronization")
+
+    c_opt1, c_opt2 = st.columns(2)
+    with c_opt1:
+        upload_mode_choice = st.radio(
+            "Upload Strategy:",
+            [
+                "📥 Insert All Records (Preserve every catalog row & duplicate ASINs)",
+                "🔄 Upsert / Deduplicate by ASIN (Merge records matching same ASIN + Wholesaler)",
+            ],
+            index=0,
+            key="cf_upload_mode_choice",
+            help="Insert All Records guarantees that all 4,987 valid catalog items are written to Cloudflare D1.",
+        )
+        upload_mode = "insert" if "Insert All" in upload_mode_choice else "upsert"
+
+    with c_opt2:
+        cleanup_choice = st.selectbox(
+            "Existing Database Records Handling:",
+            [
+                "Keep existing database records (Append mode)",
+                "Clear entire database table before upload (Fresh start - DB count matches file)",
+                "Replace records for this wholesaler only",
+            ],
+            index=0,
+            key="cf_cleanup_choice",
+            help="Choose whether to wipe previous records so your database count exactly matches this file.",
+        )
+        if "Clear entire" in cleanup_choice:
+            clear_existing = "all"
+        elif "Replace records for this wholesaler" in cleanup_choice:
+            clear_existing = "wholesaler"
+        else:
+            clear_existing = "none"
+
+    if clear_existing == "all":
+        st.warning("⚠️ **Notice**: The `wholesale_products` table will be cleared before uploading. Your database will contain only the records from this upload.")
 
     if not active_config.is_valid():
         st.warning("⚠️ Please provide your **Cloudflare Account ID**, **Database UUID**, and **API Token** in the sidebar before starting the upload.")
@@ -271,6 +344,9 @@ def render_uploader_ui():
         # Use pre-parsed records directly to avoid re-parsing large datasets
         records_to_upload = st.session_state.get("uploader_parsed_records", dataset_source)
 
+        # Extract wholesaler name from parsed records if available
+        first_ws = parsed_records[0].get("wholesaler_company_name") if parsed_records else None
+
         with st.spinner("Synchronizing with Cloudflare D1..."):
             report = uploader_service.upload_dataset(
                 dataset_source=records_to_upload,
@@ -279,6 +355,9 @@ def render_uploader_ui():
                 slot_size=effective_slot,
                 batch_size=batch_size,
                 auto_init_schema=True,
+                upload_mode=upload_mode,
+                clear_existing=clear_existing,
+                wholesaler_name=first_ws,
             )
 
         if report.get("success"):

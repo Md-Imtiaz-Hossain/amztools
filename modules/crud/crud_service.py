@@ -132,6 +132,17 @@ class D1CrudService:
         items = [WholesaleProductModel.from_d1_row(row) for row in res.get("results", [])]
         return PaginatedQueryResult(items=items, total_count=total_count, page=criteria.page, page_size=limit)
 
+    def get_product_by_id(self, row_id: int) -> Optional[WholesaleProductModel]:
+        """
+        Fetch a single wholesale product record by its primary key ID.
+        """
+        sql = "SELECT * FROM wholesale_products WHERE id = ? LIMIT 1;"
+        res = self.client.execute_query(sql, [int(row_id)])
+        rows = res.get("results", [])
+        if rows:
+            return WholesaleProductModel.from_d1_row(rows[0])
+        return None
+
     def get_product_by_asin(self, asin: str, wholesaler: Optional[str] = None) -> Optional[WholesaleProductModel]:
         """
         Fetch a single wholesale product record by ASIN and optional wholesaler.
@@ -185,7 +196,7 @@ class D1CrudService:
         col_str = ", ".join(columns)
         params = [product_data[c] for c in columns]
 
-        sql = f"INSERT OR REPLACE INTO wholesale_products ({col_str}) VALUES ({placeholders});"
+        sql = f"INSERT INTO wholesale_products ({col_str}) VALUES ({placeholders});"
         try:
             self.client.execute_query(sql, params)
             return True, f"Successfully created product {asin}!"

@@ -243,6 +243,100 @@ class CloudflareD1Client:
         return {"success": True, "total_changes": total_changes, "batch_count": len(batch_payload)}
 
 
+    def has_unique_asin_constraint(self) -> bool:
+        """
+        Detects whether the wholesale_products table has a UNIQUE constraint on (asin, wholesaler_company_name).
+        """
+        try:
+            res = self.execute_query("PRAGMA index_list(wholesale_products);", [])
+            indexes = res.get("results", [])
+            for idx in indexes:
+                is_unique = (idx.get("unique") == 1 or idx.get("unique") is True)
+                origin = idx.get("origin", "")
+                idx_name = idx.get("name", "")
+                # Origin 'u' signifies an auto-generated unique constraint index
+                if is_unique and origin == "u":
+                    col_res = self.execute_query(f"PRAGMA index_info({idx_name});", [])
+                    cols = [c.get("name") for c in col_res.get("results", [])]
+                    if "asin" in cols:
+                        return True
+            return False
+        except Exception as e:
+            logger.warning(f"Error checking unique constraint on wholesale_products: {e}")
+            return False
+
+    def migrate_remove_unique_constraint(self) -> Tuple[bool, str]:
+        """
+        Safely migrates the wholesale_products table in Cloudflare D1 to drop
+        the UNIQUE(asin, wholesaler_company_name) constraint, preserving all
+        existing records while enabling multiple items with identical ASINs.
+        """
+        try:
+            table_info = self.execute_query("PRAGMA table_info(wholesale_products);", [])
+            cols_info = table_info.get("results", [])
+            if not cols_info:
+                return False, "Table wholesale_products does not exist or has no columns."
+
+            col_names = [c["name"] for c in cols_info]
+            col_defs = []
+            for col in cols_info:
+                c_name = col["name"]
+                c_type = col.get("type", "TEXT")
+                not_null = " NOT NULL" if col.get("notnull") else ""
+                dflt_val = col.get("dflt_value")
+                dflt = f" DEFAULT {dflt_val}" if dflt_val is not None else ""
+                if col.get("pk"):
+                    col_defs.append(f"{c_name} INTEGER PRIMARY KEY AUTOINCREMENT")
+                else:
+                    col_defs.append(f"{c_name} {c_type}{not_null}{dflt}")
+
+            cols_def_str = ", ".join(col_defs)
+            cols_str = ", ".join(col_names)
+
+            migration_stmts = [
+                f"CREATE TABLE wholesale_products_migration_temp ({cols_def_str});",
+                f"INSERT INTO wholesale_products_migration_temp ({cols_str}) SELECT {cols_str} FROM wholesale_products;",
+                "DROP TABLE wholesale_products;",
+                "ALTER TABLE wholesale_products_migration_temp RENAME TO wholesale_products;",
+                "CREATE INDEX IF NOT EXISTS idx_wholesale_asin ON wholesale_products(asin);",
+                "CREATE INDEX IF NOT EXISTS idx_wholesale_product_id ON wholesale_products(product_id);",
+                "CREATE INDEX IF NOT EXISTS idx_wholesale_wholesaler ON wholesale_products(wholesaler_company_name);",
+                "CREATE INDEX IF NOT EXISTS idx_wholesale_category ON wholesale_products(category);",
+                "CREATE INDEX IF NOT EXISTS idx_wholesale_sales_rank ON wholesale_products(sales_rank);",
+                "CREATE INDEX IF NOT EXISTS idx_wholesale_profit ON wholesale_products(profit);",
+                "CREATE INDEX IF NOT EXISTS idx_wholesale_roi ON wholesale_products(roi_pct);",
+                "CREATE INDEX IF NOT EXISTS idx_wholesale_last_run ON wholesale_products(last_run);",
+                "CREATE INDEX IF NOT EXISTS idx_wholesale_analyzing_software ON wholesale_products(analyzing_software_name);",
+            ]
+
+            for s in migration_stmts:
+                self.execute_query(s, [])
+
+            return True, "✅ Successfully migrated table wholesale_products: UNIQUE constraint removed. All duplicate ASIN rows are now accepted!"
+        except Exception as e:
+            return False, f"Migration failed: {e}"
+
+    def clear_table(self, wholesaler_company_name: Optional[str] = None) -> Tuple[bool, str]:
+        """
+        Clears records from wholesale_products table.
+        If wholesaler_company_name is provided, clears only records for that wholesaler.
+        Otherwise, wipes the entire wholesale_products table.
+        """
+        try:
+            if wholesaler_company_name and wholesaler_company_name.strip():
+                ws = wholesaler_company_name.strip()
+                self.execute_query("DELETE FROM wholesale_products WHERE wholesaler_company_name = ?;", [ws])
+                return True, f"✅ Successfully cleared previous records for wholesaler '{ws}'."
+            else:
+                self.execute_query("DELETE FROM wholesale_products;", [])
+                try:
+                    self.execute_query("DELETE FROM sqlite_sequence WHERE name = 'wholesale_products';", [])
+                except Exception:
+                    pass
+                return True, "✅ Successfully cleared all records from wholesale_products table."
+        except Exception as e:
+            return False, f"Failed clearing table: {e}"
+
     def init_database_schema(self, schema_sql_path: Optional[str] = None) -> Tuple[bool, str]:
         """
         Execute the DDL schema to ensure the wholesale_products table and indexes exist.
@@ -288,6 +382,13 @@ class CloudflareD1Client:
                 self.execute_query("ALTER TABLE wholesale_products ADD COLUMN analyzing_software_name TEXT DEFAULT 'InternalAMZ';", [])
             except Exception:
                 pass
+
+            # Auto-check if existing table has outdated UNIQUE constraint on ASIN
+            if self.has_unique_asin_constraint():
+                logger.info("Outdated UNIQUE(asin, wholesaler_company_name) constraint detected. Auto-migrating table...")
+                mig_ok, mig_msg = self.migrate_remove_unique_constraint()
+                if mig_ok:
+                    return True, f"✅ Database schema initialized and migrated! (Removed UNIQUE constraint to allow all rows)."
 
             return True, f"✅ Database schema initialized! Executed {executed_count} DDL statements (tables & indexes created)."
         except Exception as e:

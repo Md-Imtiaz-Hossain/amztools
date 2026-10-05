@@ -60,6 +60,35 @@ class TestUploaderPipeline(unittest.TestCase):
         self.assertIn("INSERT INTO wholesale_products", sql)
         self.assertIn("ON CONFLICT(asin, wholesaler_company_name) DO UPDATE SET", sql)
 
+    def test_build_insert_sql(self):
+        service = D1UploaderService(client=None)
+        sample_record = {
+            "asin": "B0BDHWDR12",
+            "wholesaler_company_name": "Acme Supplies",
+            "title": "AirPods Pro",
+            "cost": 175.0,
+            "sell_price": 249.0,
+        }
+        sql = service.build_insert_sql(sample_record)
+        self.assertIn("INSERT INTO wholesale_products", sql)
+        self.assertNotIn("ON CONFLICT", sql)
+
+    def test_duplicate_asins_integrity_tracking(self):
+        records = [
+            {"asin": "B001", "wholesaler_company_name": "Acme", "product_id": "UPC1"},
+            {"asin": "B001", "wholesaler_company_name": "Acme", "product_id": "UPC2"}, # Dup ASIN
+            {"asin": "B002", "wholesaler_company_name": "Acme", "product_id": "UPC3"},
+            {"asin": "B003", "wholesaler_company_name": "Acme", "product_id": "UPC4"},
+            {"asin": "B003", "wholesaler_company_name": "Acme", "product_id": "UPC5"}, # Dup ASIN
+            {"asin": "", "wholesaler_company_name": "Acme", "product_id": "UPC6"},     # Missing ASIN
+        ]
+        integrity = validate_record_integrity(records)
+        self.assertEqual(integrity["total_records"], 6)
+        self.assertEqual(integrity["valid_count"], 5)
+        self.assertEqual(integrity["missing_asin_count"], 1)
+        self.assertEqual(integrity["unique_asin_count"], 3)
+        self.assertEqual(integrity["duplicate_asin_count"], 2)
+
 
     def test_pre_parsed_passthrough(self):
         records = [
