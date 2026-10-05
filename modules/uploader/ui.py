@@ -56,6 +56,16 @@ def render_uploader_ui():
         key="cf_api_token_input",
     )
 
+    st.sidebar.subheader("⚡ Upload Tuning")
+    slot_size = st.sidebar.number_input(
+        "Notification Slot Size (Records)",
+        min_value=50,
+        max_value=2000,
+        value=int(st.session_state.get("cf_slot_size", 500)),
+        step=50,
+        help="Divide large uploads into slots of this size. Gives a confirmation notification after each slot.",
+        key="cf_slot_size_input",
+    )
     batch_size = st.sidebar.slider(
         "Batch Size (Rows per Request)",
         min_value=10,
@@ -70,6 +80,7 @@ def render_uploader_ui():
     st.session_state["cf_database_id"] = database_id.strip()
     st.session_state["cf_api_token"] = api_token.strip()
     st.session_state["cf_batch_size"] = batch_size
+    st.session_state["cf_slot_size"] = slot_size
 
     active_config = CloudflareD1Config(
         account_id=st.session_state["cf_account_id"],
@@ -146,20 +157,32 @@ def render_uploader_ui():
         try:
             parsed_records = parse_and_validate_analysis_file(dataset_source)
             integrity = validate_record_integrity(parsed_records)
+            st.session_state["uploader_parsed_records"] = parsed_records
         except Exception as e:
             st.error(f"Error parsing source dataset: {e}")
             return
 
     # Metrics Row
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Records", integrity["total_records"])
-    m2.metric("Valid ASINs", integrity["valid_count"])
-    m3.metric("Missing ASINs", integrity["missing_asin_count"])
+    m1.metric("Total Records", f"{integrity['total_records']:,}")
+    m2.metric("Valid ASINs", f"{integrity['valid_count']:,}")
+    m3.metric("Missing ASINs", f"{integrity['missing_asin_count']:,}")
     m4.metric("Target Table", "wholesale_products")
 
     if integrity["valid_count"] == 0:
         st.error("⚠️ No valid products with recognized ASINs were found in this dataset. Please verify the file.")
         return
+
+    effective_slot = int(st.session_state.get("cf_slot_size", slot_size))
+    total_valid = integrity["valid_count"]
+    estimated_slots = max(1, (total_valid + effective_slot - 1) // effective_slot)
+
+    if total_valid > effective_slot:
+        st.info(
+            f"💡 **Smart Slot Batching Active**: Dataset with **{total_valid:,} records** "
+            f"will be written safely in slots of **{effective_slot} records** (~**{estimated_slots} slots**). "
+            f"You will receive a notification and row confirmation every time {effective_slot} records are written to the database."
+        )
 
     with st.expander("👁️ Preview Parsed Database Records (First 5 Rows)", expanded=True):
         preview_df = pd.DataFrame(parsed_records[:5])
@@ -180,26 +203,106 @@ def render_uploader_ui():
 
     if st.button("🚀 Start Upload to Cloudflare D1", type="primary", key="start_d1_upload_btn"):
         uploader_service = D1UploaderService(client)
+
+        # Real-time metrics dashboard
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+        m_uploaded = m_col1.empty()
+        m_slots = m_col2.empty()
+        m_speed = m_col3.empty()
+        m_eta = m_col4.empty()
+
+        m_uploaded.metric("Uploaded Records", f"0 / {total_valid:,}")
+        m_slots.metric("Completed Slots", f"0 / {estimated_slots}")
+        m_speed.metric("Upload Speed", "0.0 rows/s")
+        m_eta.metric("Estimated Time Left", "--")
+
         progress_bar = st.progress(0.0)
         status_text = st.empty()
+
+        feed_expander = st.expander("📋 Live Slot Confirmations & Audit Log", expanded=True)
+        feed_container = feed_expander.empty()
+        slot_feed_messages = []
+
+        def handle_slot_notification(info: dict):
+            slot_num = info.get("slot_number", 1)
+            t_slots = info.get("total_slots", 1)
+            start_row = info.get("start_row", 1)
+            end_row = info.get("end_row", 1)
+            uploaded_now = info.get("slot_uploaded", 0)
+
+            # 1. Pop up a toast notification on the user's screen
+            toast_text = f"✅ Slot {slot_num}/{t_slots}: Excel rows {start_row} to {end_row} complete upload to database!"
+            try:
+                st.toast(toast_text, icon="💾")
+            except Exception:
+                pass
+
+            # 2. Update KPI metrics
+            cum_uploaded = info.get("cumulative_uploaded", 0)
+            tot_records = info.get("total_records", total_valid)
+            speed = info.get("speed_records_per_sec", 0.0)
+            eta_sec = info.get("eta_seconds", 0)
+
+            m_uploaded.metric("Uploaded Records", f"{cum_uploaded:,} / {tot_records:,}")
+            m_slots.metric("Completed Slots", f"{slot_num} / {t_slots}")
+            m_speed.metric("Upload Speed", f"{speed} rows/s")
+
+            if cum_uploaded >= tot_records:
+                eta_str = "Complete"
+            elif eta_sec >= 60:
+                eta_str = f"{eta_sec // 60}m {eta_sec % 60}s"
+            else:
+                eta_str = f"{eta_sec}s"
+            m_eta.metric("Estimated Time Left", eta_str)
+
+            # 3. Log to live feed container
+            feed_entry = (
+                f"- **Slot {slot_num}/{t_slots}**: Excel rows **{start_row} to {end_row}** "
+                f"({uploaded_now:,} records) successfully uploaded in {info.get('slot_elapsed_seconds', 0)}s "
+                f"*(Speed: {speed} rows/s)*"
+            )
+            slot_feed_messages.append(feed_entry)
+            feed_container.markdown("\n".join(slot_feed_messages))
 
         def update_progress(pct: float, msg: str):
             progress_bar.progress(min(1.0, max(0.0, pct)))
             status_text.text(msg)
 
+        # Use pre-parsed records directly to avoid re-parsing large datasets
+        records_to_upload = st.session_state.get("uploader_parsed_records", dataset_source)
+
         with st.spinner("Synchronizing with Cloudflare D1..."):
             report = uploader_service.upload_dataset(
-                dataset_source=dataset_source,
+                dataset_source=records_to_upload,
                 progress_callback=update_progress,
+                slot_callback=handle_slot_notification,
+                slot_size=effective_slot,
+                batch_size=batch_size,
                 auto_init_schema=True,
             )
 
         if report.get("success"):
             st.balloons()
             st.success(
-                f"🎉 **Upload Successful!** Synchronized **{report['uploaded_count']} products** "
-                f"into Cloudflare D1 table `wholesale_products` in **{report.get('elapsed_seconds', 0)} seconds**."
+                f"🎉 **Upload Successful!** Synchronized **{report['uploaded_count']:,} products** "
+                f"into Cloudflare D1 table `wholesale_products` across **{report.get('completed_slots', 0)} slots** "
+                f"in **{report.get('elapsed_seconds', 0)} seconds**."
             )
+            if report.get("slot_logs"):
+                with st.expander("📊 Complete Slot Breakdown Table", expanded=False):
+                    summary_df = pd.DataFrame([
+                        {
+                            "Slot": s["slot_number"],
+                            "Excel Data Rows": f"{s['start_row']} – {s['end_row']}",
+                            "Records": s["slot_records_count"],
+                            "Uploaded": s["slot_uploaded"],
+                            "Failed": s["slot_failed"],
+                            "Duration": f"{s['slot_elapsed_seconds']}s",
+                            "Speed": f"{s['speed_records_per_sec']} rows/s",
+                        }
+                        for s in report["slot_logs"]
+                    ])
+                    st.dataframe(summary_df, use_container_width=True)
         else:
             st.error("❌ Database upload encountered errors.")
             for err in report.get("errors", []):

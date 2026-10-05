@@ -14,6 +14,7 @@ Endpoints:
 
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -33,7 +34,8 @@ class CloudflareD1Client:
     Responsibilities:
     - Authenticates requests via Bearer Token.
     - Sends parameterized SQL statements to Cloudflare D1.
-    - Supports single queries and batch query execution.
+    - Supports single queries and batch query execution with retry backoff.
+    - Uses persistent HTTP connection pooling for high-throughput uploads.
     - Handles HTTP errors, network timeouts, and JSON response decoding.
     """
 
@@ -42,6 +44,17 @@ class CloudflareD1Client:
         Initialize the D1 client with connection configuration.
         """
         self.config = config
+        self._session = None
+
+    def _get_session(self):
+        """
+        Get or initialize a persistent requests session with connection pooling.
+        """
+        if requests is None:
+            return None
+        if self._session is None:
+            self._session = requests.Session()
+        return self._session
 
     def _get_headers(self) -> Dict[str, str]:
         """
@@ -123,6 +136,7 @@ class CloudflareD1Client:
         if requests is None:
             raise RuntimeError("Python 'requests' library is not installed.")
 
+        session = self._get_session() or requests
         url = self.config.query_endpoint_url
         headers = self._get_headers()
         payload = {
@@ -130,7 +144,7 @@ class CloudflareD1Client:
             "params": params or [],
         }
 
-        resp = requests.post(url, headers=headers, json=payload, timeout=self.config.timeout_seconds)
+        resp = session.post(url, headers=headers, json=payload, timeout=self.config.timeout_seconds)
         data = resp.json()
 
         if not data.get("success"):
@@ -150,12 +164,13 @@ class CloudflareD1Client:
             }
         return {"success": True, "results": [], "meta": {}}
 
-    def execute_batch(self, batch_payload: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def execute_batch(self, batch_payload: List[Dict[str, Any]], max_retries: int = 3) -> Dict[str, Any]:
         """
-        Execute multiple SQL statements in batch against Cloudflare D1.
+        Execute multiple SQL statements in batch against Cloudflare D1 with automatic retry backoff.
 
         Args:
             batch_payload (List[Dict[str, Any]]): List of query dicts, each with 'sql' and 'params'.
+            max_retries (int): Number of retries for transient 429/5xx errors.
 
         Returns:
             Dict[str, Any]: Summary response with total changes and status.
@@ -166,35 +181,67 @@ class CloudflareD1Client:
         if requests is None:
             raise RuntimeError("Python 'requests' library is not installed.")
 
+        session = self._get_session() or requests
         url = self.config.query_endpoint_url
         headers = self._get_headers()
-
-        # Cloudflare D1 batch format: {"batch": [{"sql": "...", "params": [...]}, ...]}
         payload = {"batch": batch_payload}
-        resp = requests.post(url, headers=headers, json=payload, timeout=self.config.timeout_seconds)
-        
-        # If the endpoint doesn't support the {"batch": ...} wrapper, fallback to sequential execution
-        if resp.status_code != 200 or not resp.json().get("success"):
-            logger.warning("Batch endpoint returned non-200. Attempting fallback individual execution...")
-            total_changes = 0
-            for item in batch_payload:
-                res = self.execute_query(item.get("sql", ""), item.get("params", []))
-                total_changes += res.get("meta", {}).get("changes", 1)
-            return {"success": True, "total_changes": total_changes, "batch_count": len(batch_payload)}
 
-        data = resp.json()
-        results = data.get("result", [])
+        for attempt in range(max_retries):
+            try:
+                resp = session.post(url, headers=headers, json=payload, timeout=self.config.timeout_seconds)
+
+                # Handle rate limiting (HTTP 429)
+                if resp.status_code == 429:
+                    retry_after = 2 * (attempt + 1)
+                    try:
+                        retry_after = int(resp.headers.get("Retry-After", retry_after))
+                    except Exception:
+                        pass
+                    logger.warning(f"D1 Rate limit (429). Retrying in {retry_after}s (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(retry_after)
+                    continue
+
+                # Handle transient 5xx server errors
+                if resp.status_code in (500, 502, 503, 504):
+                    backoff = 1.5 * (attempt + 1)
+                    logger.warning(f"D1 HTTP {resp.status_code}. Retrying in {backoff}s (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(backoff)
+                    continue
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("success"):
+                        results = data.get("result", [])
+                        total_changes = 0
+                        for r in results:
+                            meta = r.get("meta", {})
+                            total_changes += meta.get("changes", 0)
+                        return {
+                            "success": True,
+                            "total_changes": total_changes,
+                            "batch_count": len(batch_payload),
+                            "raw_result": results,
+                        }
+                    else:
+                        break
+                else:
+                    break
+
+            except (requests.Timeout, requests.ConnectionError) as conn_err:
+                logger.warning(f"D1 network warning: {conn_err}. Retrying in {1.5*(attempt+1)}s...")
+                time.sleep(1.5 * (attempt + 1))
+            except Exception as e:
+                logger.warning(f"D1 batch exception: {e}")
+                break
+
+        # Fallback to sequential execution if batch wrapper returned non-200 or failed
+        logger.warning("Batch endpoint returned non-200 or error. Attempting fallback individual execution...")
         total_changes = 0
-        for r in results:
-            meta = r.get("meta", {})
-            total_changes += meta.get("changes", 0)
+        for item in batch_payload:
+            res = self.execute_query(item.get("sql", ""), item.get("params", []))
+            total_changes += res.get("meta", {}).get("changes", 1)
+        return {"success": True, "total_changes": total_changes, "batch_count": len(batch_payload)}
 
-        return {
-            "success": True,
-            "total_changes": total_changes,
-            "batch_count": len(batch_payload),
-            "raw_result": results,
-        }
 
     def init_database_schema(self, schema_sql_path: Optional[str] = None) -> Tuple[bool, str]:
         """

@@ -181,6 +181,10 @@ def parse_and_validate_analysis_file(
     if source is None:
         return []
 
+    # If source is already a list of parsed record dicts, return directly
+    if isinstance(source, list):
+        return source
+
     # 1. Ingest into DataFrame
     if isinstance(source, pd.DataFrame):
         df = source.copy()

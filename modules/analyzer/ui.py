@@ -527,7 +527,12 @@ def render_analyzer_ui():
                         raw_cost = clean_cost(row.get(cost_col, 0.0))
 
                         clean_id, id_type = clean_identifier(raw_id)
-                        status_text.text(f"Analyzing {index + 1}/{total_rows}: {clean_id or 'Item'}...")
+                        current_num = index + 1
+                        
+                        # Throttle UI progress updates to prevent websocket flooding on large datasets
+                        if current_num == 1 or current_num % 25 == 0 or current_num == total_rows:
+                            status_text.text(f"Analyzing {current_num}/{total_rows}: {clean_id or 'Item'}...")
+                            progress_bar.progress(current_num / total_rows)
 
                         item_data = fetch_amazon_item_data(
                             raw_id,
@@ -550,8 +555,8 @@ def render_analyzer_ui():
                         )
 
                         analyzed_rows.append(target_row)
-                        progress_bar.progress((index + 1) / total_rows)
 
+                    progress_bar.progress(1.0)
                     status_text.text("Analysis complete! Full target dataset generated.")
                     st.session_state["bulk_analysis_results"] = pd.DataFrame(analyzed_rows)
 
