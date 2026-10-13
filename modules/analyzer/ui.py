@@ -434,7 +434,9 @@ def render_analyzer_ui():
             )
 
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        sample_file_path = os.path.join(project_root, "sample_supplier_catalog.csv")
+        sample_file_path = os.path.join(project_root, "data", "sample_supplier_catalog.csv")
+        if not os.path.exists(sample_file_path):
+            sample_file_path = os.path.join(project_root, "sample_supplier_catalog.csv")
 
         with u_col2:
             st.write("")
