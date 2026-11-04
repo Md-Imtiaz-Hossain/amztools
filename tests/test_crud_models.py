@@ -9,6 +9,7 @@ from modules.crud.models import (
     ProductFilterCriteria,
     PaginatedQueryResult,
 )
+from modules.crud.crud_service import D1CrudService
 
 
 class TestRouterAndModels(unittest.TestCase):
@@ -63,6 +64,43 @@ class TestRouterAndModels(unittest.TestCase):
     def test_paginated_query_result(self):
         res = PaginatedQueryResult(items=[1, 2, 3], total_count=25, page=1, page_size=10)
         self.assertEqual(res.total_pages, 3)
+
+    def test_crud_service_query_optimizations(self):
+        executed = []
+
+        class MockD1Client:
+            def execute_query(self, sql, params=None):
+                executed.append((sql, params))
+                if "COUNT(*)" in sql:
+                    return {"success": True, "results": [{"total_count": 120}]}
+                return {
+                    "success": True,
+                    "results": [{"id": 1, "asin": "B0CSF57LJ9", "wholesaler_company_name": "Medcare LLC", "cost": 3.23}],
+                }
+
+        svc = D1CrudService(MockD1Client())
+
+        # 1. Page 1 with returned items < page_size should skip COUNT(*) and use exact ASIN predicate
+        criteria_p1 = ProductFilterCriteria(keyword="B0CSF57LJ9", page=1, page_size=25)
+        res_p1 = svc.fetch_products(criteria_p1)
+        self.assertEqual(res_p1.total_count, 1)
+        self.assertEqual(len(executed), 1, "Should skip COUNT(*) when page 1 results < page_size")
+        self.assertNotIn("SELECT *", executed[0][0], "Should select only DISPLAY_SQL_COLUMNS")
+        self.assertIn("(asin = ? OR parent_asin = ?)", executed[0][0])
+
+        # 2. Page 2 with known_total_count should skip COUNT(*)
+        executed.clear()
+        criteria_p2 = ProductFilterCriteria(page=2, page_size=25)
+        res_p2 = svc.fetch_products(criteria_p2, known_total_count=120)
+        self.assertEqual(res_p2.total_count, 120)
+        self.assertEqual(len(executed), 1, "Should skip COUNT(*) when known_total_count is provided")
+
+        # 3. toggle_favorite should execute only 1 UPDATE without pre-SELECT
+        executed.clear()
+        ok, _ = svc.toggle_favorite("B0CSF57LJ9", "Medcare LLC", False)
+        self.assertTrue(ok)
+        self.assertEqual(len(executed), 1, "toggle_favorite should not run a pre-SELECT")
+        self.assertTrue(executed[0][0].startswith("UPDATE"))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ Purpose:
 """
 
 import datetime
+import time
 import pandas as pd
 import streamlit as st
 
@@ -22,6 +23,20 @@ from modules.uploader.d1_client import CloudflareD1Client
 from modules.analyzer.excel_exporter import export_to_target_excel
 from .models import ProductFilterCriteria
 from .crud_service import D1CrudService
+
+METADATA_CACHE_TTL_SEC = 300  # 5 minutes cache for full-table KPI stats and distinct dropdowns
+
+
+def _invalidate_crud_cache():
+    """Clear cached D1 statistics, dropdowns, and count signatures after a DB write."""
+    for k in (
+        "crud_metadata_cache",
+        "crud_last_filter_sig",
+        "crud_cached_total_count",
+        "crud_cached_edit_prod",
+        "crud_cached_inspect_prod",
+    ):
+        st.session_state.pop(k, None)
 
 
 def render_crud_ui():
@@ -75,10 +90,39 @@ def render_crud_ui():
         )
         return
 
-    # --- 1. KPI SUMMARY DASHBOARD ---
-    st.subheader("1. Live Cloudflare D1 Database Overview")
-    with st.spinner("Fetching database statistics..."):
-        stats = crud_service.get_database_statistics()
+    # --- 1. KPI SUMMARY DASHBOARD (Cached in session_state to avoid 3 full-table scans on every click) ---
+    hdr_col1, hdr_col2 = st.columns([4, 1])
+    with hdr_col1:
+        st.subheader("1. Live Cloudflare D1 Database Overview")
+    with hdr_col2:
+        if st.button("🔄 Refresh Stats", key="crud_refresh_stats_btn", use_container_width=True):
+            _invalidate_crud_cache()
+
+    db_cache_key = f"{active_config.account_id}:{active_config.database_id}"
+    meta_cache = st.session_state.get("crud_metadata_cache")
+    now_ts = time.time()
+
+    if (
+        not meta_cache
+        or meta_cache.get("db_key") != db_cache_key
+        or (now_ts - meta_cache.get("ts", 0)) > METADATA_CACHE_TTL_SEC
+    ):
+        with st.spinner("Fetching database statistics..."):
+            stats = crud_service.get_database_statistics()
+            distinct_cats = crud_service.get_distinct_categories()
+            distinct_ws = crud_service.get_distinct_wholesalers()
+        meta_cache = {
+            "db_key": db_cache_key,
+            "ts": now_ts,
+            "stats": stats,
+            "categories": distinct_cats,
+            "wholesalers": distinct_ws,
+        }
+        st.session_state["crud_metadata_cache"] = meta_cache
+    else:
+        stats = meta_cache["stats"]
+        distinct_cats = meta_cache["categories"]
+        distinct_ws = meta_cache["wholesalers"]
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Total Stored Products", f"{stats['total_products']:,}")
@@ -103,9 +147,9 @@ def render_crud_ui():
     st.markdown("---")
     st.subheader("2. Filter & Search Database Leads")
 
-    # Fetch distinct categories and wholesalers for dynamic dropdowns
-    categories = ["All Categories"] + crud_service.get_distinct_categories()
-    wholesalers = ["All Wholesalers"] + crud_service.get_distinct_wholesalers()
+    # Use cached distinct categories and wholesalers for dynamic dropdowns
+    categories = ["All Categories"] + distinct_cats
+    wholesalers = ["All Wholesalers"] + distinct_ws
 
     f_row1_col1, f_row1_col2, f_row1_col3, f_row1_col4 = st.columns(4)
     with f_row1_col1:
@@ -141,9 +185,24 @@ def render_crud_ui():
         sort_asc = st.radio("Sort Order", ["Descending (High to Low)", "Ascending (Low to High)"], index=0) == "Ascending (Low to High)"
         page_size = st.selectbox("Page Size", [25, 50, 100], index=1, key="crud_page_size")
 
-    # Current Page Tracking
+    # Current Page Tracking & Filter Signature Caching (avoids running COUNT(*) on page/sort changes)
     if "crud_current_page" not in st.session_state:
         st.session_state["crud_current_page"] = 1
+
+    filter_sig = (
+        db_cache_key,
+        (keyword or "").strip(),
+        selected_cat,
+        selected_ws,
+        float(min_profit or 0.0),
+        float(min_roi or 0.0),
+        bool(only_prof),
+        bool(only_fav),
+    )
+    if st.session_state.get("crud_last_filter_sig") != filter_sig:
+        st.session_state["crud_current_page"] = 1
+        st.session_state["crud_last_filter_sig"] = filter_sig
+        st.session_state["crud_cached_total_count"] = None
 
     criteria = ProductFilterCriteria(
         keyword=keyword,
@@ -160,8 +219,10 @@ def render_crud_ui():
     )
 
     # --- 3. FETCH & DISPLAY DATA ---
+    known_total = st.session_state.get("crud_cached_total_count")
     with st.spinner("Querying Cloudflare D1..."):
-        query_result = crud_service.fetch_products(criteria)
+        query_result = crud_service.fetch_products(criteria, known_total_count=known_total)
+    st.session_state["crud_cached_total_count"] = query_result.total_count
 
     items = query_result.items
     total_count = query_result.total_count
@@ -232,7 +293,13 @@ def render_crud_ui():
         
         edit_asin = st.text_input("Enter ASIN to Edit", placeholder="e.g. B0BDHWDR12", key="crud_edit_asin_input")
         if edit_asin:
-            prod = crud_service.get_product_by_asin(edit_asin)
+            clean_edit_asin = edit_asin.strip().upper()
+            cached_edit = st.session_state.get("crud_cached_edit_prod")
+            if cached_edit and cached_edit.get("asin") == clean_edit_asin:
+                prod = cached_edit.get("model")
+            else:
+                prod = crud_service.get_product_by_asin(clean_edit_asin)
+                st.session_state["crud_cached_edit_prod"] = {"asin": clean_edit_asin, "model": prod}
             if prod:
                 st.success(f"Loaded `{prod.asin}`: {prod.title or 'Product'}")
                 e_col1, e_col2, e_col3 = st.columns(3)
@@ -256,8 +323,10 @@ def render_crud_ui():
                                 "favorite": 1 if is_fav else 0,
                                 "custom_notes": new_notes,
                             },
+                            current_product=prod,
                         )
                     if ok:
+                        _invalidate_crud_cache()
                         st.success(msg)
                         st.rerun()
                     else:
@@ -270,7 +339,13 @@ def render_crud_ui():
         st.markdown("#### Product Inspector & High-Resolution Images")
         inspect_asin = st.text_input("Enter ASIN to Inspect", placeholder="e.g. B0BDHWDR12", key="inspect_asin_input")
         if inspect_asin:
-            item = crud_service.get_product_by_asin(inspect_asin)
+            clean_inspect_asin = inspect_asin.strip().upper()
+            cached_inspect = st.session_state.get("crud_cached_inspect_prod")
+            if cached_inspect and cached_inspect.get("asin") == clean_inspect_asin:
+                item = cached_inspect.get("model")
+            else:
+                item = crud_service.get_product_by_asin(clean_inspect_asin)
+                st.session_state["crud_cached_inspect_prod"] = {"asin": clean_inspect_asin, "model": item}
             if item:
                 st.markdown(f"### {item.title or 'Product'}")
                 st.markdown(f"**ASIN**: `{item.asin}` | **UPC/Product ID**: `{item.product_id}` | **Brand**: `{item.brand}` | **Supplier**: `{item.wholesaler_company_name}` | **Software**: `{item.analyzing_software_name or 'InternalAMZ'}`")
@@ -328,6 +403,7 @@ def render_crud_ui():
                 with st.spinner("Deleting from Cloudflare D1..."):
                     ok, msg = crud_service.delete_product(del_asin)
                 if ok:
+                    _invalidate_crud_cache()
                     st.success(msg)
                     st.rerun()
                 else:
@@ -367,6 +443,7 @@ def render_crud_ui():
                         "last_run": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     })
                 if ok:
+                    _invalidate_crud_cache()
                     st.success(msg)
                     st.rerun()
                 else:
@@ -383,27 +460,28 @@ def render_crud_ui():
                 export_df["Analyzing Software Name"] = "InternalAMZ"
             else:
                 export_df["Analyzing Software Name"] = export_df["Analyzing Software Name"].fillna("InternalAMZ").replace("", "InternalAMZ")
-            exp_col1, exp_col2 = st.columns(2)
 
-            with exp_col1:
-                # Target Excel export
-                xlsx_bytes = export_to_target_excel(export_df)
-                st.download_button(
-                    label="📥 Download Database Leads (Excel .xlsx)",
-                    data=xlsx_bytes,
-                    file_name=f"d1_wholesale_leads_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="export_db_xlsx_btn",
-                )
+            if st.button("📦 Prepare Export Files for Current Page", key="prepare_crud_export_btn"):
+                st.session_state["crud_prepared_xlsx"] = export_to_target_excel(export_df)
+                st.session_state["crud_prepared_csv"] = export_df.to_csv(index=False).encode("utf-8")
 
-            with exp_col2:
-                csv_bytes = export_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="📄 Download Database Leads (CSV)",
-                    data=csv_bytes,
-                    file_name="d1_wholesale_leads_report.csv",
-                    mime="text/csv",
-                    key="export_db_csv_btn",
-                )
+            if st.session_state.get("crud_prepared_xlsx"):
+                exp_col1, exp_col2 = st.columns(2)
+                with exp_col1:
+                    st.download_button(
+                        label="📥 Download Database Leads (Excel .xlsx)",
+                        data=st.session_state["crud_prepared_xlsx"],
+                        file_name=f"d1_wholesale_leads_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="export_db_xlsx_btn",
+                    )
+                with exp_col2:
+                    st.download_button(
+                        label="📄 Download Database Leads (CSV)",
+                        data=st.session_state["crud_prepared_csv"],
+                        file_name="d1_wholesale_leads_report.csv",
+                        mime="text/csv",
+                        key="export_db_csv_btn",
+                    )
         else:
             st.info("No items to export.")

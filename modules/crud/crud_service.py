@@ -17,6 +17,7 @@ Operations Provided:
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from modules.uploader.d1_client import CloudflareD1Client
@@ -24,6 +25,14 @@ from modules.analyzer.analytics import calculate_comprehensive_financials
 from .models import PaginatedQueryResult, ProductFilterCriteria, WholesaleProductModel
 
 logger = logging.getLogger(__name__)
+
+# Columns needed for table display & summary export (avoids reading huge text blobs like about_this_item/customer_reviews on list queries)
+DISPLAY_SQL_COLUMNS = (
+    "id, asin, parent_asin, product_id, favorite, wholesaler_company_name, "
+    "analyzing_software_name, brand, title, category, sales_rank, cost, sell_price, "
+    "referral_fee, fba_pick_pack_fee, profit, margin_pct, roi_pct, current_est_sales, "
+    "estimated_monthly_revenue, total_offers, average_rating, total_review_count, last_run"
+)
 
 # Whitelist safe sort columns to prevent SQL injection
 VALID_SORT_COLUMNS = {
@@ -57,11 +66,22 @@ class D1CrudService:
         params: List[Any] = []
 
         if criteria.keyword and criteria.keyword.strip():
-            kw = f"%{criteria.keyword.strip()}%"
-            clauses.append(
-                "(asin LIKE ? OR product_id LIKE ? OR title LIKE ? OR brand LIKE ? OR wholesaler_company_name LIKE ? OR analyzing_software_name LIKE ?)"
-            )
-            params.extend([kw, kw, kw, kw, kw, kw])
+            trimmed_kw = criteria.keyword.strip()
+            if re.match(r"^B[0-9A-Z]{9}$", trimmed_kw, re.IGNORECASE):
+                # Exact ASIN match uses idx_wholesale_asin (1 row read instead of full scan)
+                upper_asin = trimmed_kw.upper()
+                clauses.append("(asin = ? OR parent_asin = ?)")
+                params.extend([upper_asin, upper_asin])
+            elif re.match(r"^\d{8,14}$", trimmed_kw):
+                # Exact barcode match uses idx_wholesale_product_id (1 row read instead of full scan)
+                clauses.append("product_id = ?")
+                params.append(trimmed_kw)
+            else:
+                kw = f"%{trimmed_kw}%"
+                clauses.append(
+                    "(asin LIKE ? OR product_id LIKE ? OR title LIKE ? OR brand LIKE ? OR wholesaler_company_name LIKE ?)"
+                )
+                params.extend([kw, kw, kw, kw, kw])
 
         if criteria.category and criteria.category not in ("All Categories", "All", ""):
             clauses.append("category = ?")
@@ -91,45 +111,60 @@ class D1CrudService:
         where_sql = " AND ".join(clauses)
         return where_sql, params
 
-    def fetch_products(self, criteria: ProductFilterCriteria) -> PaginatedQueryResult:
+    def fetch_products(
+        self,
+        criteria: ProductFilterCriteria,
+        known_total_count: Optional[int] = None,
+        select_all_columns: bool = False,
+    ) -> PaginatedQueryResult:
         """
         Fetch a paginated list of wholesale products matching filter criteria.
+        Optimized to minimize Cloudflare D1 rows_read:
+        - Selects only display columns by default instead of SELECT *
+        - Skips COUNT(*) when known_total_count is provided (pagination/sort changes)
+        - On Page 1, runs data query first and skips COUNT(*) if returned rows < limit
 
         Args:
             criteria (ProductFilterCriteria): Filter, search, and sorting parameters.
+            known_total_count (Optional[int]): Cached total count for identical filter criteria.
+            select_all_columns (bool): If True, selects * instead of DISPLAY_SQL_COLUMNS.
 
         Returns:
             PaginatedQueryResult: Wrapped list of WholesaleProductModel items with pagination metadata.
         """
         where_sql, params = self._build_where_clause(criteria)
 
-        # 1. Total Count Query
-        count_sql = f"SELECT COUNT(*) as total_count FROM wholesale_products WHERE {where_sql};"
-        count_res = self.client.execute_query(count_sql, list(params))
-        total_count = 0
-        if count_res.get("results"):
-            total_count = int(count_res["results"][0].get("total_count", 0))
-
-        if total_count == 0:
-            return PaginatedQueryResult(items=[], total_count=0, page=criteria.page, page_size=criteria.page_size)
-
-        # 2. Paginated Items Query
         sort_col = VALID_SORT_COLUMNS.get(criteria.sort_by, "profit")
         sort_dir = "ASC" if criteria.sort_ascending else "DESC"
 
         limit = max(1, criteria.page_size)
         offset = max(0, (criteria.page - 1) * limit)
+        cols_sql = "*" if select_all_columns else DISPLAY_SQL_COLUMNS
 
         items_sql = (
-            f"SELECT * FROM wholesale_products "
+            f"SELECT {cols_sql} FROM wholesale_products "
             f"WHERE {where_sql} "
             f"ORDER BY {sort_col} {sort_dir} "
             f"LIMIT ? OFFSET ?;"
         )
         query_params = list(params) + [limit, offset]
         res = self.client.execute_query(items_sql, query_params)
+        rows = res.get("results", [])
+        items = [WholesaleProductModel.from_d1_row(row) for row in rows]
 
-        items = [WholesaleProductModel.from_d1_row(row) for row in res.get("results", [])]
+        # Determine total_count without running COUNT(*) if possible
+        if known_total_count is not None and known_total_count >= 0:
+            total_count = int(known_total_count)
+        elif criteria.page == 1 and len(items) < limit:
+            # All matching rows fit on page 1 — no need to scan table for COUNT(*)
+            total_count = len(items)
+        else:
+            count_sql = f"SELECT COUNT(*) as total_count FROM wholesale_products WHERE {where_sql};"
+            count_res = self.client.execute_query(count_sql, list(params))
+            total_count = len(items)
+            if count_res.get("results"):
+                total_count = int(count_res["results"][0].get("total_count", 0))
+
         return PaginatedQueryResult(items=items, total_count=total_count, page=criteria.page, page_size=limit)
 
     def get_product_by_id(self, row_id: int) -> Optional[WholesaleProductModel]:
@@ -203,7 +238,13 @@ class D1CrudService:
         except Exception as e:
             return False, f"Failed creating product: {e}"
 
-    def update_product(self, asin: str, wholesaler: str, updates: Dict[str, Any]) -> Tuple[bool, str]:
+    def update_product(
+        self,
+        asin: str,
+        wholesaler: str,
+        updates: Dict[str, Any],
+        current_product: Optional[WholesaleProductModel] = None,
+    ) -> Tuple[bool, str]:
         """
         Update specific fields of an existing product record in Cloudflare D1.
         Automatically recalculates profitability metrics if cost or sell price changes.
@@ -214,15 +255,14 @@ class D1CrudService:
         if not updates:
             return False, "No fields specified for update."
 
-        # 1. Fetch current product to check if unit economics need recalculation
-        current = self.get_product_by_asin(clean_asin, clean_ws)
-        if not current:
-            return False, f"Product {clean_asin} ({clean_ws}) not found in database."
-
-        new_cost = updates.get("cost", current.cost)
-        new_sell = updates.get("sell_price", current.sell_price)
-
+        # 1. Only fetch current product if cost/sell_price changed and caller didn't pass current_product
         if "cost" in updates or "sell_price" in updates:
+            current = current_product or self.get_product_by_asin(clean_asin, clean_ws)
+            if not current:
+                return False, f"Product {clean_asin} ({clean_ws}) not found in database."
+
+            new_cost = updates.get("cost", current.cost)
+            new_sell = updates.get("sell_price", current.sell_price)
             try:
                 c_val = float(new_cost or 0.0)
                 s_val = float(new_sell or 0.0)

@@ -39,6 +39,9 @@ class CloudflareD1Client:
     - Handles HTTP errors, network timeouts, and JSON response decoding.
     """
 
+    _verified_schema_dbs = set()
+    _no_unique_asin_dbs = set()
+
     def __init__(self, config: CloudflareD1Config):
         """
         Initialize the D1 client with connection configuration.
@@ -246,7 +249,11 @@ class CloudflareD1Client:
     def has_unique_asin_constraint(self) -> bool:
         """
         Detects whether the wholesale_products table has a UNIQUE constraint on (asin, wholesaler_company_name).
+        Caches negative result per database_id to avoid repeated PRAGMA round-trips on every upload.
         """
+        db_key = f"{self.config.account_id}:{self.config.database_id}"
+        if db_key in self._no_unique_asin_dbs:
+            return False
         try:
             res = self.execute_query("PRAGMA index_list(wholesale_products);", [])
             indexes = res.get("results", [])
@@ -260,6 +267,7 @@ class CloudflareD1Client:
                     cols = [c.get("name") for c in col_res.get("results", [])]
                     if "asin" in cols:
                         return True
+            self._no_unique_asin_dbs.add(db_key)
             return False
         except Exception as e:
             logger.warning(f"Error checking unique constraint on wholesale_products: {e}")
@@ -337,16 +345,22 @@ class CloudflareD1Client:
         except Exception as e:
             return False, f"Failed clearing table: {e}"
 
-    def init_database_schema(self, schema_sql_path: Optional[str] = None) -> Tuple[bool, str]:
+    def init_database_schema(self, schema_sql_path: Optional[str] = None, force: bool = False) -> Tuple[bool, str]:
         """
         Execute the DDL schema to ensure the wholesale_products table and indexes exist.
+        Caches schema verification per database_id to avoid redundant DDL queries on every upload.
 
         Args:
             schema_sql_path (Optional[str]): Path to schema.sql file.
+            force (bool): If True, executes DDL even if already verified in this process.
 
         Returns:
             Tuple[bool, str]: (Success boolean, Status description).
         """
+        db_key = f"{self.config.account_id}:{self.config.database_id}"
+        if not force and db_key in self._verified_schema_dbs:
+            return True, "✅ Database schema already verified in this session."
+
         if not schema_sql_path:
             schema_sql_path = os.path.join(os.path.dirname(__file__), "schema.sql")
 
@@ -370,26 +384,21 @@ class CloudflareD1Client:
         if not statements_to_run:
             return False, "No valid SQL statements found in schema.sql."
 
-        # Execute each DDL statement sequentially
-        executed_count = 0
         try:
-            for s in statements_to_run:
-                self.execute_query(s, [])
-                executed_count += 1
-
-            # Migration fallback for existing tables: add analyzing_software_name if not already present
-            try:
-                self.execute_query("ALTER TABLE wholesale_products ADD COLUMN analyzing_software_name TEXT DEFAULT 'InternalAMZ';", [])
-            except Exception:
-                pass
+            batch_payload = [{"sql": f"{s};", "params": []} for s in statements_to_run]
+            self.execute_batch(batch_payload)
+            executed_count = len(statements_to_run)
 
             # Auto-check if existing table has outdated UNIQUE constraint on ASIN
             if self.has_unique_asin_constraint():
                 logger.info("Outdated UNIQUE(asin, wholesaler_company_name) constraint detected. Auto-migrating table...")
                 mig_ok, mig_msg = self.migrate_remove_unique_constraint()
                 if mig_ok:
+                    self._verified_schema_dbs.add(db_key)
+                    self._no_unique_asin_dbs.add(db_key)
                     return True, f"✅ Database schema initialized and migrated! (Removed UNIQUE constraint to allow all rows)."
 
+            self._verified_schema_dbs.add(db_key)
             return True, f"✅ Database schema initialized! Executed {executed_count} DDL statements (tables & indexes created)."
         except Exception as e:
             return False, f"Failed initializing schema: {e}"

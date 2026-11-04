@@ -59,6 +59,7 @@ class TestUploaderPipeline(unittest.TestCase):
         sql = service.build_upsert_sql(sample_record)
         self.assertIn("INSERT INTO wholesale_products", sql)
         self.assertIn("ON CONFLICT(asin, wholesaler_company_name) DO UPDATE SET", sql)
+        self.assertIn("WHERE wholesale_products.cost IS NOT excluded.cost", sql)
 
     def test_build_insert_sql(self):
         service = D1UploaderService(client=None)

@@ -107,6 +107,4 @@ CREATE INDEX IF NOT EXISTS idx_wholesale_category ON wholesale_products(category
 CREATE INDEX IF NOT EXISTS idx_wholesale_sales_rank ON wholesale_products(sales_rank);
 CREATE INDEX IF NOT EXISTS idx_wholesale_profit ON wholesale_products(profit);
 CREATE INDEX IF NOT EXISTS idx_wholesale_roi ON wholesale_products(roi_pct);
-CREATE INDEX IF NOT EXISTS idx_wholesale_last_run ON wholesale_products(last_run);
-CREATE INDEX IF NOT EXISTS idx_wholesale_analyzing_software ON wholesale_products(analyzing_software_name);
 

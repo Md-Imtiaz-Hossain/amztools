@@ -361,6 +361,8 @@ def render_uploader_ui():
             )
 
         if report.get("success"):
+            for k in ("crud_metadata_cache", "crud_last_filter_sig", "crud_cached_total_count"):
+                st.session_state.pop(k, None)
             st.balloons()
             st.success(
                 f"🎉 **Upload Successful!** Synchronized **{report['uploaded_count']:,} products** "

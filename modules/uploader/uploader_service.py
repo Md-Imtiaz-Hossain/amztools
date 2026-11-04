@@ -60,10 +60,20 @@ class D1UploaderService:
         update_clauses.append("updated_at = CURRENT_TIMESTAMP")
         update_str = ", ".join(update_clauses)
 
+        # Conditional WHERE guard so SQLite skips rewriting the row & indexes (0 rows_written) when key fields are unchanged
+        change_check_cols = [
+            c for c in ("cost", "sell_price", "profit", "sales_rank", "total_offers", "title")
+            if c in columns
+        ]
+        where_guard = ""
+        if change_check_cols:
+            conds = " OR ".join([f"wholesale_products.{c} IS NOT excluded.{c}" for c in change_check_cols])
+            where_guard = f" WHERE {conds}"
+
         sql = (
             f"INSERT INTO wholesale_products ({col_list_str}) "
             f"VALUES ({placeholders_str}) "
-            f"ON CONFLICT(asin, wholesaler_company_name) DO UPDATE SET {update_str};"
+            f"ON CONFLICT(asin, wholesaler_company_name) DO UPDATE SET {update_str}{where_guard};"
         )
         return sql
 
