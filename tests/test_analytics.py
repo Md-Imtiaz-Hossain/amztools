@@ -17,6 +17,8 @@ class TestAnalytics(unittest.TestCase):
         self.assertEqual(clean_cost("$12.50"), 12.50)
         self.assertEqual(clean_cost("€99.99"), 99.99)
         self.assertEqual(clean_cost("1,250.00"), 1250.00)
+        self.assertEqual(clean_cost("3,23"), 3.23)
+        self.assertEqual(clean_cost("$2.33 / unit (Case 144)"), 2.33)
         self.assertEqual(clean_cost(None), 0.0)
         self.assertEqual(clean_cost("nan"), 0.0)
         self.assertEqual(clean_cost(""), 0.0)

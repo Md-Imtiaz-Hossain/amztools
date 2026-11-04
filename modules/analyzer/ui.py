@@ -20,7 +20,7 @@ import pandas as pd
 import streamlit as st
 
 from .config import MARKETPLACE_MAP
-from .file_loader import load_supplier_file
+from .file_loader import load_supplier_file, detect_catalog_columns
 from .analytics import clean_cost
 from .sp_api_client import (
     clean_identifier,
@@ -474,18 +474,7 @@ def render_analyzer_ui():
             st.subheader("2. Map Catalog Columns")
             cols = list(df.columns)
 
-            default_upc_idx = 0
-            default_cost_idx = 0
-            for idx, c in enumerate(cols):
-                c_lower = str(c).lower()
-                if any(k in c_lower for k in ["upc", "ean", "barcode", "asin", "sku", "isbn", "item id", "product id"]):
-                    default_upc_idx = idx
-                    break
-            for idx, c in enumerate(cols):
-                c_lower = str(c).lower()
-                if any(k in c_lower for k in ["cost", "price", "wholesale", "unit price", "rate"]):
-                    default_cost_idx = idx
-                    break
+            default_upc_idx, default_cost_idx = detect_catalog_columns(df)
 
             c_map1, c_map2 = st.columns(2)
             with c_map1:
@@ -495,6 +484,13 @@ def render_analyzer_ui():
                     index=default_upc_idx,
                     key="analyzer_upc_col",
                 )
+                sample_ids = [
+                    str(v).strip()
+                    for v in df[upc_col].dropna().head(3)
+                    if str(v).strip().lower() not in ("", "nan", "none")
+                ]
+                if sample_ids:
+                    st.caption(f"Sample IDs: `{', '.join(sample_ids)}`")
             with c_map2:
                 cost_col = st.selectbox(
                     "Wholesale Cost Column",
@@ -502,6 +498,13 @@ def render_analyzer_ui():
                     index=default_cost_idx,
                     key="analyzer_cost_col",
                 )
+                sample_costs = [
+                    f"${clean_cost(v):.2f}"
+                    for v in df[cost_col].dropna().head(3)
+                    if str(v).strip().lower() not in ("", "nan", "none")
+                ]
+                if sample_costs:
+                    st.caption(f"Sample Unit Costs: `{', '.join(sample_costs)}`")
 
             # Action Button
             action_label = "🚀 Run Demo Catalog Analysis" if is_demo else "🚀 Run Live SP-API Catalog Analysis"

@@ -16,17 +16,42 @@ import re
 def clean_cost(val):
     """
     Safely parse price/cost strings into a float, stripping currency symbols,
-    commas, and whitespace.
+    commas, and whitespace. Extracts the first numeric token to prevent
+    concatenating pack counts or secondary numbers (e.g. '$2.33 (Case 144)').
     """
     if val is None:
         return 0.0
+    if isinstance(val, (int, float)):
+        try:
+            import math
+            if math.isnan(val) or math.isinf(val):
+                return 0.0
+            return round(float(val), 2)
+        except (ValueError, TypeError):
+            return 0.0
+
     s = str(val).strip()
     if s.lower() in ("nan", "none", "null", ""):
         return 0.0
-    # Strip currency signs ($ € £), commas, letters
-    cleaned = re.sub(r"[^\d.]", "", s)
+
+    # Match the first number token (supports thousand commas like 1,250.00 or decimal comma like 3,23)
+    m = re.search(r"\d[\d,.]*", s)
+    if not m:
+        return 0.0
+
+    num_str = m.group(0).rstrip(".,")
+    if "," in num_str and "." not in num_str:
+        # Check if comma is a decimal separator (e.g. '3,23') vs thousands separator (e.g. '1,250')
+        parts = num_str.split(",")
+        if len(parts) == 2 and len(parts[1]) in (1, 2):
+            num_str = f"{parts[0]}.{parts[1]}"
+        else:
+            num_str = num_str.replace(",", "")
+    else:
+        num_str = num_str.replace(",", "")
+
     try:
-        return round(float(cleaned), 2)
+        return round(float(num_str), 2)
     except (ValueError, TypeError):
         return 0.0
 

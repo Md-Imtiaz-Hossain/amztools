@@ -8,6 +8,8 @@ from modules.analyzer.sp_api_client import (
     clean_identifier,
     fetch_amazon_item_data,
     build_full_target_row,
+    _convert_dim_to_inches,
+    _convert_weight_to_pounds,
 )
 
 
@@ -197,6 +199,72 @@ class TestSPApiClient(unittest.TestCase):
         # Verify exact column list and order match
         self.assertEqual(list(quick_df.columns), list(bulk_df.columns))
         self.assertEqual(list(quick_df.columns), TARGET_COLUMNS)
+
+    def test_convert_weight_to_pounds_units(self):
+        """Ensure kilograms, grams, ounces, and pounds convert accurately without kg matching 'gram'."""
+        # 0.0181437 kg -> ~0.04 lb (previously matched 'gram' and rounded to 0.0)
+        self.assertAlmostEqual(
+            _convert_weight_to_pounds({"value": 0.0181437, "unit": "kilograms"}),
+            0.04,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            _convert_weight_to_pounds({"value": 1.0, "unit": "kg"}),
+            2.205,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            _convert_weight_to_pounds({"value": 18.14, "unit": "grams"}),
+            0.04,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            _convert_weight_to_pounds({"value": 16.0, "unit": "ounces"}),
+            1.0,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            _convert_weight_to_pounds({"value": 0.04, "unit": "pounds"}),
+            0.04,
+            places=2,
+        )
+
+    def test_convert_dim_to_inches_units(self):
+        """Ensure centimeters and millimeters are converted to inches instead of returned raw."""
+        self.assertAlmostEqual(
+            _convert_dim_to_inches({"value": 2.54, "unit": "centimeters"}),
+            1.0,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            _convert_dim_to_inches({"value": 7.6, "unit": "cm"}),
+            2.99,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            _convert_dim_to_inches({"value": 25.4, "unit": "millimeters"}),
+            1.0,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            _convert_dim_to_inches({"value": 2.99, "unit": "inches"}),
+            2.99,
+            places=2,
+        )
+
+    def test_clean_urls_not_excel_formulas(self):
+        """Ensure Amazon Link, Keepa, CamelCC, and Selling Restriction Link are clean URLs."""
+        item = fetch_amazon_item_data(
+            raw_identifier="019425205698",
+            credentials={},
+            marketplace="US",
+            is_demo=True,
+            cost=2.33,
+        )
+        row = build_full_target_row(item_data=item, cost=2.33, wholesaler_company_name="Medcare LLC")
+        for link_col in ("Amazon Link", "Keepa", "CamelCC", "Selling Restriction Link"):
+            self.assertTrue(str(row[link_col]).startswith("https://"), f"{link_col} should be a clean URL")
+            self.assertFalse(str(row[link_col]).startswith("=HYPERLINK"), f"{link_col} should not be a formula")
 
 
 if __name__ == "__main__":

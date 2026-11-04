@@ -10,6 +10,7 @@ Purpose:
 
 import datetime
 import hashlib
+import os
 import re
 import time
 try:
@@ -18,10 +19,11 @@ except ImportError:
     requests = None
 
 try:
-    from sp_api.api import CatalogItems, Products
+    from sp_api.api import CatalogItems, Products, ListingsRestrictions
 except ImportError:
     CatalogItems = None
     Products = None
+    ListingsRestrictions = None
 
 from .analytics import (
     calculate_comprehensive_financials,
@@ -77,7 +79,9 @@ TARGET_COLUMNS = [
     "Manufacturer",
     "Color",
     "Model",
+    "Size",
     "Part Number",
+    "Material",
     "Is Hazmat",
     "Keepa",
     "CamelCC",
@@ -95,6 +99,89 @@ TARGET_COLUMNS = [
     "Wholesaller Company Name",
     "Analyzing Software Name",
 ]
+
+
+def _convert_dim_to_inches(dim_obj):
+    """
+    Converts an SP-API dimension object {'value': ..., 'unit': ...} to inches.
+    """
+    if not isinstance(dim_obj, dict) or dim_obj.get("value") is None:
+        return None
+    try:
+        val = float(dim_obj.get("value"))
+    except (ValueError, TypeError):
+        return None
+    if val <= 0:
+        return None
+
+    unit = str(dim_obj.get("unit", "inches") or "inches").strip().lower()
+    if "centimeter" in unit or unit in ("cm", "cms"):
+        val = val / 2.54
+    elif "millimeter" in unit or unit in ("mm", "mms"):
+        val = val / 25.4
+    elif "meter" in unit or unit == "m":
+        val = val * 39.3700787
+    elif "foot" in unit or "feet" in unit or unit in ("ft", "fts"):
+        val = val * 12.0
+
+    return round(val, 2)
+
+
+def _convert_weight_to_pounds(wt_obj):
+    """
+    Converts an SP-API weight object {'value': ..., 'unit': ...} to pounds (lb).
+    Checks kilogram/kg and milligram/mg BEFORE gram/g so 'kilograms' or 'kg' is never
+    misidentified as grams.
+    """
+    if not isinstance(wt_obj, dict) or wt_obj.get("value") is None:
+        return None
+    try:
+        wt_val = float(wt_obj.get("value"))
+    except (ValueError, TypeError):
+        return None
+    if wt_val <= 0:
+        return None
+
+    unit = str(wt_obj.get("unit", "pounds") or "pounds").strip().lower()
+    if "kilogram" in unit or unit in ("kg", "kgs"):
+        lbs = wt_val * 2.20462262
+    elif "milligram" in unit or unit in ("mg", "mgs"):
+        lbs = wt_val * 0.00000220462
+    elif "gram" in unit or unit in ("g", "gm", "gms", "gr"):
+        lbs = wt_val * 0.00220462262
+    elif "ounce" in unit or unit in ("oz", "ozs"):
+        lbs = wt_val / 16.0
+    else:
+        lbs = wt_val
+
+    rounded = round(lbs, 2)
+    if rounded == 0.0 and lbs > 0:
+        rounded = round(lbs, 4) or 0.01
+    return rounded
+
+
+def _call_sp_api_with_retry(func, *args, max_retries=3, base_delay=1.2, **kwargs):
+    """
+    Executes an SP-API method with exponential backoff on rate-limit (429 / QuotaExceeded)
+    or transient network errors.
+    """
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            err_str = f"{type(exc).__name__} {exc}".lower()
+            is_throttled = any(
+                k in err_str
+                for k in ("throttl", "quota", "429", "too many requests", "rate limit", "timed out", "timeout")
+            )
+            if is_throttled and attempt < max_retries - 1:
+                time.sleep(base_delay * (2 ** attempt))
+                continue
+            raise
+    if last_exc:
+        raise last_exc
 
 
 def clean_identifier(val):
@@ -237,8 +324,8 @@ def extract_sp_api_images(item_images_payload):
 
 def fetch_amazon_page_details(asin):
     """
-    Fetches Amazon Customer Reviews and Best Sellers Ranks (Main Category and Sub Category)
-    from Amazon public product detail pages.
+    Fetches Amazon Customer Reviews, Best Sellers Ranks (Main Category and Sub Category),
+    and fallback price/parent ASIN from Amazon public product detail pages.
     Returns dict:
         {
             "customer_reviews": formatted_str,
@@ -248,6 +335,8 @@ def fetch_amazon_page_details(asin):
             "main_sales_rank": int or None,
             "sub_category": str or None,
             "sub_sales_rank": int or None,
+            "price": float or None,
+            "parent_asin": str or None,
         }
     """
     if not asin or str(asin) in ("INVALID_ID", "NOT_FOUND"):
@@ -259,6 +348,8 @@ def fetch_amazon_page_details(asin):
             "main_sales_rank": None,
             "sub_category": None,
             "sub_sales_rank": None,
+            "price": None,
+            "parent_asin": None,
         }
 
     headers = {
@@ -278,6 +369,8 @@ def fetch_amazon_page_details(asin):
     sub_cat, sub_rank = None, None
     rating_val, review_count = None, 0
     formatted_reviews = "No reviews found"
+    page_price = None
+    page_parent_asin = None
 
     try:
         resp = requests.get(url, headers=headers, timeout=5)
@@ -301,29 +394,55 @@ def fetch_amazon_page_details(asin):
                 review_count = int(review_match.group(1).replace(",", "").strip()) if review_match else 0
                 formatted_reviews = f"{rating_val:.1f} out of 5 stars (Reviews: {review_count:,})"
 
-            # 2. Best Sellers Rank section parsing
-            bsr_match = re.search(r'Best Sellers Rank\s*</th>\s*<td>(.*?)</td>', html, re.S | re.I)
+            # 2. Best Sellers Rank section parsing (strictly scoped to BSR section)
+            bsr_match = re.search(r'Best Sellers Rank\s*</th>\s*<td[^>]*>(.*?)</td>', html, re.S | re.I)
+            if not bsr_match:
+                bsr_match = re.search(r'Best Sellers Rank.*?</ul>', html, re.S | re.I)
             if not bsr_match:
                 bsr_match = re.search(r'Best Sellers Rank[^\n\r<]*\n*(.*?)(?=</td>|</tr>|</div>|\n\n)', html, re.S | re.I)
-            snippet = bsr_match.group(1) if bsr_match else html
+            snippet = bsr_match.group(0) if bsr_match else ""
 
-            items = re.findall(r'#([0-9,]+)\s+in\s+(.*?)(?=\s*\(|<br|</li>|</td>|$)', snippet, re.S | re.I)
-            cleaned = []
-            for r_str, cat_str in items:
-                cat_clean = re.sub(r'<[^>]+>', '', cat_str).strip()
-                cat_clean = cat_clean.replace('&amp;', '&').strip()
-                cat_clean = re.sub(r'\(.*', '', cat_clean).strip()
-                try:
-                    r_int = int(r_str.replace(',', ''))
-                    if cat_clean and r_int > 0:
-                        cleaned.append((cat_clean, r_int))
-                except ValueError:
-                    pass
+            if snippet:
+                items = re.findall(r'#([0-9,]+)\s+in\s+(.*?)(?=\s*\(|<br|</li>|</td>|$)', snippet, re.S | re.I)
+                cleaned = []
+                for r_str, cat_str in items:
+                    cat_clean = re.sub(r'<[^>]+>', '', cat_str).strip()
+                    cat_clean = cat_clean.replace('&amp;', '&').strip()
+                    cat_clean = re.sub(r'\(.*', '', cat_clean).strip()
+                    try:
+                        r_int = int(r_str.replace(',', ''))
+                        if cat_clean and r_int > 0:
+                            cleaned.append((cat_clean, r_int))
+                    except ValueError:
+                        pass
 
-            if len(cleaned) >= 1:
-                main_cat, main_rank = cleaned[0]
-            if len(cleaned) >= 2:
-                sub_cat, sub_rank = cleaned[1]
+                if len(cleaned) >= 1:
+                    main_cat, main_rank = cleaned[0]
+                if len(cleaned) >= 2:
+                    sub_cat, sub_rank = cleaned[1]
+
+            # 3. Fallback BuyBox / Listing Price extraction from page
+            for price_pat in (
+                r'id=[\'"]corePriceDisplay_desktop_feature_div[\'"].*?class=[\'"]a-offscreen[\'"]>\s*\$([0-9,]+\.[0-9]{2})\s*<',
+                r'id=[\'"]corePrice_feature_div[\'"].*?class=[\'"]a-offscreen[\'"]>\s*\$([0-9,]+\.[0-9]{2})\s*<',
+                r'"priceAmount"\s*:\s*([0-9]+\.[0-9]{1,2})',
+                r'id=[\'"]priceblock_ourprice[\'"][^>]*>\s*\$([0-9,]+\.[0-9]{2})',
+                r'class=[\'"]a-price\s+aok-align-center[^\'"]*[\'"].*?class=[\'"]a-offscreen[\'"]>\s*\$([0-9,]+\.[0-9]{2})\s*<',
+            ):
+                pm = re.search(price_pat, html, re.S | re.I)
+                if pm:
+                    try:
+                        val_p = round(float(pm.group(1).replace(",", "")), 2)
+                        if val_p > 0:
+                            page_price = val_p
+                            break
+                    except ValueError:
+                        pass
+
+            # 4. Fallback Parent ASIN extraction from page JSON
+            parent_m = re.search(r'"parentAsin"\s*:\s*"([A-Z0-9]{10})"', html)
+            if parent_m and parent_m.group(1) != asin:
+                page_parent_asin = parent_m.group(1)
 
             return {
                 "customer_reviews": formatted_reviews if rating_val else "No reviews found",
@@ -333,6 +452,8 @@ def fetch_amazon_page_details(asin):
                 "main_sales_rank": main_rank,
                 "sub_category": sub_cat,
                 "sub_sales_rank": sub_rank,
+                "price": page_price,
+                "parent_asin": page_parent_asin,
             }
     except Exception:
         pass
@@ -350,6 +471,8 @@ def fetch_amazon_page_details(asin):
         "main_sales_rank": main_rank,
         "sub_category": sub_cat,
         "sub_sales_rank": sub_rank,
+        "price": None,
+        "parent_asin": None,
     }
 
 
@@ -391,7 +514,9 @@ def _generate_demo_data(
         mfg = p["manufacturer"]
         color = p["color"]
         model = p["model"]
+        size = p.get("size", "")
         part = p["part_num"]
+        material = p.get("material", "")
         hazmat = p["hazmat"]
         brand_restr = p["brand_restriction"]
         sell_restr = p["selling_restriction"]
@@ -454,7 +579,9 @@ def _generate_demo_data(
         colors = ["Red", "Coral", "Graphite", "Matte", "Nude", "Natural", "Black", "Rose"]
         color = colors[h % len(colors)]
         model = f"MDL-{clean_id[-6:]}"
+        size = ""
         part = f"PN-{clean_id[-6:]}"
+        material = ""
         hazmat = "True" if (h % 15 == 0) else "False"
         brand_restr = "True" if (h % 7 == 0) else "False"
         sell_restr = "approval required" if (h % 2 == 0) else "not eligible"
@@ -483,16 +610,16 @@ def _generate_demo_data(
     # Price waterfall: Buybox > Lowest FBA > Lowest FBM
     sell_price = buybox if buybox is not None else (lowest_fba if lowest_fba is not None else lowest_fbm)
 
-    # Restriction link
+    # Restriction link (clean URL)
     if sell_restr == "approval required":
-        restr_link = f'=HYPERLINK("https://sellercentral.amazon.com/hz/approvalrequest/restrictions/approve?asin={asin}", "https://sellercentral.amazon.com/hz/approvalrequest/restrictions/approve?asin={asin}")'
+        restr_link = f"https://sellercentral.amazon.com/hz/approvalrequest/restrictions/approve?asin={asin}"
     else:
         restr_link = None
 
-    # External links
-    amazon_link = f'=HYPERLINK("https://www.amazon.com/dp/{asin}", "https://www.amazon.com/dp/{asin}")'
-    keepa_link = f'=HYPERLINK("https://keepa.com/#!product/1-{asin}", "https://keepa.com/#!product/1-{asin}")'
-    camel_link = f'=HYPERLINK("https://camelcamelcamel.com/search?sq={asin}", "https://camelcamelcamel.com/search?sq={asin}")'
+    # External links (clean URLs)
+    amazon_link = f"https://www.amazon.com/dp/{asin}"
+    keepa_link = f"https://keepa.com/#!product/1-{asin}"
+    camel_link = f"https://camelcamelcamel.com/search?sq={asin}"
 
     return {
         "asin": asin,
@@ -525,7 +652,9 @@ def _generate_demo_data(
         "manufacturer": mfg,
         "color": color,
         "model": model,
+        "size": size,
         "part_number": part,
+        "material": material,
         "is_hazmat": hazmat,
         "keepa": keepa_link,
         "camelcc": camel_link,
@@ -539,6 +668,39 @@ def _generate_demo_data(
     }
 
 
+def _select_best_catalog_item(items):
+    """
+    When search_catalog_items returns multiple catalog items for a barcode/keyword,
+    prefer the item that has a valid sales rank (lowest BSR) and single package quantity.
+    """
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+
+    def _item_sort_key(it):
+        best_rank = 999999999
+        for sr in it.get("salesRanks", []):
+            for dr in sr.get("displayGroupRanks", []) + sr.get("classificationRanks", []) + sr.get("ranks", []):
+                r_val = dr.get("rank", dr.get("value"))
+                if r_val is not None:
+                    try:
+                        best_rank = min(best_rank, int(r_val))
+                    except (ValueError, TypeError):
+                        pass
+        summaries = it.get("summaries", [])
+        pkg_q = 1
+        if summaries:
+            try:
+                pkg_q = int(summaries[0].get("packageQuantity", 1) or 1)
+            except (ValueError, TypeError):
+                pkg_q = 1
+        return (0 if best_rank < 999999999 else 1, 0 if pkg_q == 1 else 1, best_rank)
+
+    sorted_items = sorted(items, key=_item_sort_key)
+    return sorted_items[0]
+
+
 def fetch_amazon_item_data(
     raw_identifier=None,
     credentials=None,
@@ -550,7 +712,7 @@ def fetch_amazon_item_data(
     title=None,
 ):
     """
-    Query Amazon SP-API for a product's full 52-column dataset.
+    Query Amazon SP-API for a product's full target dataset.
     Supports both Live SP-API (Catalog v2022-04-01 + Pricing API) and Demo Simulation Mode.
     Can be invoked with raw_identifier (bulk mode) or with explicit asin, upc, title parameters (quick search mode).
     """
@@ -608,7 +770,9 @@ def fetch_amazon_item_data(
             "manufacturer": "",
             "color": "",
             "model": "",
+            "size": "",
             "part_number": "",
+            "material": "",
             "is_hazmat": "False",
             "keepa": "",
             "camelcc": "",
@@ -643,7 +807,9 @@ def fetch_amazon_item_data(
     mfg = ""
     color = ""
     model = ""
+    size = ""
     part_num = ""
+    material = ""
     pkg_qty = 1
     category = "Unknown"
     sales_rank = None
@@ -655,6 +821,7 @@ def fetch_amazon_item_data(
     image_links = []
     about_this_item = ""
     customer_reviews = "No reviews found"
+    catalog_list_price = None
     status_msg = "OK"
 
     # 1. Fetch Catalog Items (Version 2022-04-01)
@@ -668,23 +835,26 @@ def fetch_amazon_item_data(
         included_data = ["summaries", "attributes", "images", "salesRanks", "relationships"]
 
         if id_type == "ASIN":
-            search_res = catalog_api.get_catalog_item(
+            search_res = _call_sp_api_with_retry(
+                catalog_api.get_catalog_item,
                 asin=clean_id,
                 marketplaceIds=[marketplace_id],
                 includedData=included_data,
             )
             item = search_res.payload or {}
         elif id_type == "KEYWORDS":
-            search_res = catalog_api.search_catalog_items(
+            search_res = _call_sp_api_with_retry(
+                catalog_api.search_catalog_items,
                 keywords=[clean_id],
                 marketplaceIds=[marketplace_id],
                 includedData=included_data,
             )
             payload_data = search_res.payload or {}
             items = payload_data.get("items", [])
-            item = items[0] if items else None
+            item = _select_best_catalog_item(items)
         else:
-            search_res = catalog_api.search_catalog_items(
+            search_res = _call_sp_api_with_retry(
+                catalog_api.search_catalog_items,
                 identifiers=[clean_id],
                 identifiersType=id_type,
                 marketplaceIds=[marketplace_id],
@@ -692,7 +862,18 @@ def fetch_amazon_item_data(
             )
             payload_data = search_res.payload or {}
             items = payload_data.get("items", [])
-            item = items[0] if items else None
+            # If 12-digit UPC returned no match, also try 13-digit EAN ('0' + UPC)
+            if not items and id_type == "UPC" and len(clean_id) == 12:
+                search_res = _call_sp_api_with_retry(
+                    catalog_api.search_catalog_items,
+                    identifiers=["0" + clean_id],
+                    identifiersType="EAN",
+                    marketplaceIds=[marketplace_id],
+                    includedData=included_data,
+                )
+                payload_data = search_res.payload or {}
+                items = payload_data.get("items", [])
+            item = _select_best_catalog_item(items)
 
         if not item:
             return {
@@ -726,7 +907,9 @@ def fetch_amazon_item_data(
                 "manufacturer": "",
                 "color": "",
                 "model": "",
+                "size": "",
                 "part_number": "",
+                "material": "",
                 "is_hazmat": "False",
                 "keepa": "",
                 "camelcc": "",
@@ -738,6 +921,7 @@ def fetch_amazon_item_data(
             }
 
         asin = item.get("asin", clean_id)
+        attrs = item.get("attributes", {}) or {}
         summaries = item.get("summaries", [])
         if summaries:
             s0 = summaries[0]
@@ -746,58 +930,99 @@ def fetch_amazon_item_data(
             mfg = s0.get("manufacturer", brand)
             color = s0.get("color", "")
             model = s0.get("modelNumber", "")
+            size = s0.get("size", "")
             part_num = s0.get("partNumber", "")
             pkg_qty = int(s0.get("packageQuantity", 1) or 1)
+            if s0.get("websiteDisplayGroupName"):
+                category = str(s0.get("websiteDisplayGroupName")).strip()
             browse = s0.get("browseClassification", {})
-            if browse:
-                sub_category = browse.get("displayName", "Beauty & Personal Care")
+            if browse and browse.get("displayName"):
+                sub_category = browse.get("displayName")
 
-        # Relationships (Parent ASIN)
+        # Fallback attribute extraction when summaries omit physical/metadata fields
+        if not color and attrs.get("color"):
+            color = str(attrs["color"][0].get("value", "") or "").strip()
+        if not model and attrs.get("model_number"):
+            model = str(attrs["model_number"][0].get("value", "") or "").strip()
+        if not size and attrs.get("size"):
+            size = str(attrs["size"][0].get("value", "") or "").strip()
+        if not part_num and attrs.get("part_number"):
+            part_num = str(attrs["part_number"][0].get("value", "") or "").strip()
+        if not material and attrs.get("material"):
+            material = str(attrs["material"][0].get("value", "") or "").strip()
+        if (not mfg or mfg == "N/A") and attrs.get("manufacturer"):
+            mfg = str(attrs["manufacturer"][0].get("value", "") or "").strip()
+        if pkg_qty == 1 and attrs.get("item_package_quantity"):
+            try:
+                pkg_qty = int(attrs["item_package_quantity"][0].get("value", 1) or 1)
+            except (ValueError, TypeError):
+                pass
+
+        # Catalog list_price fallback if present
+        if attrs.get("list_price"):
+            try:
+                lp_val = float(attrs["list_price"][0].get("value", 0) or 0)
+                if lp_val > 0:
+                    catalog_list_price = round(lp_val, 2)
+            except (ValueError, TypeError, IndexError):
+                pass
+
+        # Hazmat detection from attributes
+        if attrs.get("hazmat") or attrs.get("safety_data_sheet_url"):
+            hazmat = "True"
+        elif attrs.get("dangerous_goods_regulations"):
+            dgr = [str(d.get("value", "")).lower() for d in attrs["dangerous_goods_regulations"] if isinstance(d, dict)]
+            if any(v not in ("not_applicable", "not applicable", "none", "") for v in dgr):
+                hazmat = "True"
+
+        # Relationships (Parent ASIN) - Supports both v2022-04-01 nested and flat schemas
         relationships = item.get("relationships", [])
         if relationships:
-            for rel in relationships:
-                parents = rel.get("parentAsins", [])
+            for rel_group in relationships:
+                parents = rel_group.get("parentAsins", [])
                 if parents:
                     parent_asin = parents[0]
                     break
+                for inner_rel in rel_group.get("relationships", []):
+                    inner_parents = inner_rel.get("parentAsins", [])
+                    if inner_parents:
+                        parent_asin = inner_parents[0]
+                        break
+                if parent_asin:
+                    break
 
-        # Dimensions & Weight from attributes
-        attrs = item.get("attributes", {})
-        pkg_dims_data = attrs.get("package_dimensions", [{}])[0] if attrs.get("package_dimensions") else {}
-        if not pkg_dims_data:
-            pkg_dims_data = attrs.get("item_package_dimensions", [{}])[0] if attrs.get("item_package_dimensions") else {}
+        # Dimensions (converted to inches) & Weight (converted to pounds)
+        pkg_dims_data = (
+            (attrs.get("item_package_dimensions") or [{}])[0]
+            or (attrs.get("package_dimensions") or [{}])[0]
+            or (attrs.get("item_dimensions") or [{}])[0]
+        )
+        if pkg_dims_data:
+            l_in = _convert_dim_to_inches(pkg_dims_data.get("length"))
+            w_in = _convert_dim_to_inches(pkg_dims_data.get("width"))
+            h_in = _convert_dim_to_inches(pkg_dims_data.get("height"))
+            if l_in and w_in and h_in:
+                dims_str = f"{l_in} x {w_in} x {h_in}"
 
-        l_val = pkg_dims_data.get("length", {}).get("value")
-        w_val = pkg_dims_data.get("width", {}).get("value")
-        h_val = pkg_dims_data.get("height", {}).get("value")
-        if l_val and w_val and h_val:
-            dims_str = f"{l_val} x {w_val} x {h_val}"
-
-        pkg_wt_data = attrs.get("package_weight", [{}])[0] if attrs.get("package_weight") else {}
-        if not pkg_wt_data:
-            pkg_wt_data = attrs.get("item_package_weight", [{}])[0] if attrs.get("item_package_weight") else {}
-        if pkg_wt_data.get("value"):
-            wt_val = float(pkg_wt_data.get("value"))
-            unit = pkg_wt_data.get("unit", "pounds").lower()
-            if "ounce" in unit or "oz" in unit:
-                pkg_weight = round(wt_val / 16.0, 2)
-            elif "gram" in unit or "g" in unit:
-                pkg_weight = round(wt_val * 0.00220462, 2)
-            elif "kilogram" in unit or "kg" in unit:
-                pkg_weight = round(wt_val * 2.20462, 2)
-            else:
-                pkg_weight = round(wt_val, 2)
+        pkg_wt_data = (
+            (attrs.get("item_package_weight") or [{}])[0]
+            or (attrs.get("package_weight") or [{}])[0]
+            or (attrs.get("item_weight") or [{}])[0]
+        )
+        if pkg_wt_data:
+            pkg_weight = _convert_weight_to_pounds(pkg_wt_data)
 
         # Sales Rank extraction: Separate Main Category (displayGroupRanks) & Sub Category (classificationRanks)
         sales_ranks = item.get("salesRanks", [])
         for sr in sales_ranks:
-            # 1. displayGroupRanks: Top-level Main Department (e.g. Arts, Crafts & Sewing)
+            # 1. displayGroupRanks: Top-level Main Department (e.g. Beauty & Personal Care)
             disp_ranks = sr.get("displayGroupRanks", [])
             for dr in disp_ranks:
                 r_val = dr.get("rank", dr.get("value"))
                 t_val = dr.get("title")
                 if not t_val and dr.get("websiteDisplayGroup"):
-                    t_val = dr.get("websiteDisplayGroup").replace("_display_on_website", "").replace("_", " ").title()
+                    wdg = dr.get("websiteDisplayGroup").replace("_display_on_website", "").replace("_", " ").title()
+                    t_val = "Beauty & Personal Care" if wdg.lower() == "beauty" else wdg
                 if r_val is not None:
                     try:
                         sales_rank = int(r_val)
@@ -807,7 +1032,7 @@ def fetch_amazon_item_data(
                     except (ValueError, TypeError):
                         pass
 
-            # 2. classificationRanks: Sub-category / Specific browse node (e.g. Paint Pens & Markers)
+            # 2. classificationRanks: Sub-category / Specific browse node (e.g. Eyeshadow)
             class_ranks = sr.get("classificationRanks", [])
             for cr in class_ranks:
                 r_val = cr.get("rank", cr.get("value"))
@@ -871,7 +1096,7 @@ def fetch_amazon_item_data(
     except Exception as e:
         status_msg = f"Catalog error: {e}"
 
-    # 2. Fetch Live Price & Offers (Products Pricing API)
+    # 2. Fetch Live Price & Offers (Products Pricing API with retry + Competitive Pricing fallback)
     buybox_landed = None
     lowest_fba = None
     lowest_fbm = None
@@ -880,44 +1105,92 @@ def fetch_amazon_item_data(
     new_fbm_offers = 0
     buybox_contention = 0
 
-    if asin and asin != "NOT_FOUND":
+    if asin and asin != "NOT_FOUND" and Products is not None:
+        products_api = None
         try:
-            time.sleep(0.35)  # Rate limit safety
+            time.sleep(0.35)
             products_api = Products(
                 marketplace=marketplace,
                 credentials=credentials,
             )
-            pricing_res = products_api.get_item_offers(asin=asin, item_condition="New")
+            pricing_res = _call_sp_api_with_retry(
+                products_api.get_item_offers,
+                asin=asin,
+                item_condition="New",
+                MarketplaceId=marketplace_id,
+            )
             pricing_payload = pricing_res.payload or {}
-            summary = pricing_payload.get("Summary", {})
+            summary = pricing_payload.get("Summary") or pricing_payload.get("summary") or {}
+            raw_offers = pricing_payload.get("Offers") or pricing_payload.get("offers") or []
 
-            # Total offers
-            total_offers = summary.get("TotalOfferCount", len(pricing_payload.get("Offers", [])))
-
-            # Number of FBA and FBM offers from summary or raw offers
-            offers_breakdown = summary.get("NumberOfOffers", [])
+            # Number of FBA and FBM offers from Summary.NumberOfOffers
+            offers_breakdown = summary.get("NumberOfOffers") or summary.get("numberOfOffers") or []
             for ob in offers_breakdown:
-                fchannel = ob.get("fulfillmentChannel", "").upper()
-                count = int(ob.get("OfferCount", 0))
+                cond = str(ob.get("condition", "new")).lower()
+                if cond and cond != "new":
+                    continue
+                fchannel = str(ob.get("fulfillmentChannel", "")).upper()
+                count = int(ob.get("OfferCount", ob.get("offerCount", 0)) or 0)
                 if "AMAZON" in fchannel:
                     new_fba_offers += count
                 else:
                     new_fbm_offers += count
 
-            # Buy Box
-            buy_box_prices = summary.get("BuyBoxPrices", [])
-            if buy_box_prices:
-                bb = buy_box_prices[0]
-                lp = float(bb.get("ListingPrice", {}).get("Amount", 0.0))
-                sp = float(bb.get("Shipping", {}).get("Amount", 0.0))
-                buybox_landed = round(lp + sp, 2)
+            # Fallback offer counts from raw Offers if NumberOfOffers was omitted
+            if new_fba_offers == 0 and new_fbm_offers == 0 and raw_offers:
+                for off in raw_offers:
+                    if off.get("IsFulfilledByAmazon") or off.get("isFulfilledByAmazon"):
+                        new_fba_offers += 1
+                    else:
+                        new_fbm_offers += 1
 
-            # Lowest Prices
-            lowest_prices = summary.get("LowestPrices", [])
+            # Total offers
+            total_offers = int(
+                summary.get("TotalOfferCount", summary.get("totalOfferCount", 0))
+                or (new_fba_offers + new_fbm_offers)
+                or len(raw_offers)
+            )
+
+            # Buy Box from Summary.BuyBoxPrices
+            buy_box_prices = summary.get("BuyBoxPrices") or summary.get("buyBoxPrices") or []
+            for bb in buy_box_prices:
+                landed_amt = bb.get("LandedPrice", {}).get("Amount")
+                if landed_amt is not None:
+                    buybox_landed = round(float(landed_amt), 2)
+                else:
+                    lp = float(bb.get("ListingPrice", {}).get("Amount", 0.0) or 0.0)
+                    sp = float(bb.get("Shipping", {}).get("Amount", 0.0) or 0.0)
+                    if lp > 0:
+                        buybox_landed = round(lp + sp, 2)
+                if buybox_landed and buybox_landed > 0:
+                    break
+
+            # Fallback Buy Box from raw Offers (IsBuyBoxWinner)
+            if buybox_landed is None and raw_offers:
+                for off in raw_offers:
+                    if off.get("IsBuyBoxWinner") or off.get("isBuyBoxWinner"):
+                        lp = float(off.get("ListingPrice", {}).get("Amount", 0.0) or 0.0)
+                        sp = float(off.get("Shipping", {}).get("Amount", 0.0) or 0.0)
+                        if lp > 0:
+                            buybox_landed = round(lp + sp, 2)
+                            break
+
+            # Lowest Prices from Summary.LowestPrices
+            lowest_prices = summary.get("LowestPrices") or summary.get("lowestPrices") or []
             for lp_obj in lowest_prices:
-                fchannel = lp_obj.get("fulfillmentChannel", "").upper()
-                amt = float(lp_obj.get("ListingPrice", {}).get("Amount", 0.0)) + float(lp_obj.get("Shipping", {}).get("Amount", 0.0))
-                amt = round(amt, 2)
+                cond = str(lp_obj.get("condition", "new")).lower()
+                if cond and cond != "new":
+                    continue
+                fchannel = str(lp_obj.get("fulfillmentChannel", "")).upper()
+                landed_amt = lp_obj.get("LandedPrice", {}).get("Amount")
+                if landed_amt is not None:
+                    amt = round(float(landed_amt), 2)
+                else:
+                    lp = float(lp_obj.get("ListingPrice", {}).get("Amount", 0.0) or 0.0)
+                    sp = float(lp_obj.get("Shipping", {}).get("Amount", 0.0) or 0.0)
+                    amt = round(lp + sp, 2)
+                if amt <= 0:
+                    continue
                 if "AMAZON" in fchannel:
                     if lowest_fba is None or amt < lowest_fba:
                         lowest_fba = amt
@@ -925,47 +1198,160 @@ def fetch_amazon_item_data(
                     if lowest_fbm is None or amt < lowest_fbm:
                         lowest_fbm = amt
 
-            # Contention: count raw offers within 3% of Buy Box
-            raw_offers = pricing_payload.get("Offers", [])
-            if buybox_landed and buybox_landed > 0 and raw_offers:
+            # Fallback Lowest FBA / FBM from raw Offers
+            if raw_offers:
                 for off in raw_offers:
-                    op = float(off.get("ListingPrice", {}).get("Amount", 0.0)) + float(off.get("Shipping", {}).get("Amount", 0.0))
-                    if op <= buybox_landed * 1.03:
+                    lp = float(off.get("ListingPrice", {}).get("Amount", 0.0) or 0.0)
+                    sp = float(off.get("Shipping", {}).get("Amount", 0.0) or 0.0)
+                    amt = round(lp + sp, 2)
+                    if amt <= 0:
+                        continue
+                    is_fba = bool(off.get("IsFulfilledByAmazon") or off.get("isFulfilledByAmazon"))
+                    if is_fba:
+                        if lowest_fba is None or amt < lowest_fba:
+                            lowest_fba = amt
+                    else:
+                        if lowest_fbm is None or amt < lowest_fbm:
+                            lowest_fbm = amt
+
+            # Contention: count raw offers within 3% of Buy Box (or lowest price)
+            ref_price = buybox_landed or lowest_fba or lowest_fbm
+            if ref_price and ref_price > 0 and raw_offers:
+                for off in raw_offers:
+                    op = float(off.get("ListingPrice", {}).get("Amount", 0.0) or 0.0) + float(off.get("Shipping", {}).get("Amount", 0.0) or 0.0)
+                    if 0 < op <= ref_price * 1.03:
                         buybox_contention += 1
+            elif buybox_landed and total_offers > 0:
+                buybox_contention = 1
 
         except Exception as e:
             status_msg = f"Pricing error: {e}"
 
-    # Price resolution hierarchy
-    sell_price = buybox_landed if buybox_landed is not None else (lowest_fba if lowest_fba is not None else lowest_fbm)
+        # Fallback to get_competitive_pricing_for_asins if get_item_offers returned no prices
+        if (
+            buybox_landed is None
+            and lowest_fba is None
+            and lowest_fbm is None
+            and products_api is not None
+            and hasattr(products_api, "get_competitive_pricing_for_asins")
+        ):
+            try:
+                comp_res = _call_sp_api_with_retry(
+                    products_api.get_competitive_pricing_for_asins,
+                    asin_list=[asin],
+                    MarketplaceId=marketplace_id,
+                )
+                comp_payload = comp_res.payload or []
+                if isinstance(comp_payload, dict):
+                    comp_payload = [comp_payload]
+                for cp_item in comp_payload:
+                    prod_obj = cp_item.get("Product", cp_item)
+                    comp_pricing = prod_obj.get("CompetitivePricing", {})
+                    for cp in comp_pricing.get("CompetitivePrices", []):
+                        cond = str(cp.get("condition", "New")).lower()
+                        if cond != "new":
+                            continue
+                        price_obj = cp.get("Price", {})
+                        landed = price_obj.get("LandedPrice", {}).get("Amount")
+                        if landed is None:
+                            lp = float(price_obj.get("ListingPrice", {}).get("Amount", 0.0) or 0.0)
+                            sp = float(price_obj.get("Shipping", {}).get("Amount", 0.0) or 0.0)
+                            landed = lp + sp if lp > 0 else None
+                        if landed is not None and float(landed) > 0:
+                            buybox_landed = round(float(landed), 2)
+                            break
+                    for ol in comp_pricing.get("NumberOfOfferListings", []):
+                        cond = str(ol.get("condition", "")).lower()
+                        cnt = int(ol.get("Count", 0) or 0)
+                        if cond == "new" and total_offers == 0:
+                            total_offers = cnt
+            except Exception:
+                pass
 
-    # Dynamic URLs
-    amazon_link = f'=HYPERLINK("https://www.amazon.com/dp/{asin}", "https://www.amazon.com/dp/{asin}")'
-    keepa_link = f'=HYPERLINK("https://keepa.com/#!product/1-{asin}", "https://keepa.com/#!product/1-{asin}")'
-    camel_link = f'=HYPERLINK("https://camelcamelcamel.com/search?sq={asin}", "https://camelcamelcamel.com/search?sq={asin}")'
-
-    # Restriction simulation / URL
+    # 3. Fetch Selling Restrictions via ListingsRestrictions API if Seller ID is available
     selling_restr = "approval required"
-    selling_link = f'=HYPERLINK("https://sellercentral.amazon.com/hz/approvalrequest/restrictions/approve?asin={asin}", "https://sellercentral.amazon.com/hz/approvalrequest/restrictions/approve?asin={asin}")'
+    brand_restr = "False"
+    seller_id = (
+        (credentials.get("seller_id") if isinstance(credentials, dict) else None)
+        or os.environ.get("SP_API_SELLER_ID", "").strip()
+        or os.environ.get("SELLER_ID", "").strip()
+    )
+    if asin and asin != "NOT_FOUND" and seller_id and ListingsRestrictions is not None:
+        try:
+            restr_api = ListingsRestrictions(marketplace=marketplace, credentials=credentials)
+            restr_res = _call_sp_api_with_retry(
+                restr_api.get_listings_restrictions,
+                asin=asin,
+                conditionType="new_new",
+                sellerId=seller_id,
+                marketplaceIds=[marketplace_id],
+            )
+            restr_payload = restr_res.payload or {}
+            restrictions_list = restr_payload.get("restrictions", [])
+            if not restrictions_list:
+                selling_restr = "selling allowed"
+            else:
+                reasons = restrictions_list[0].get("reasons", [])
+                codes = [str(r.get("reasonCode", "")).upper() for r in reasons]
+                msgs = " ".join(str(r.get("message", "")).lower() for r in reasons)
+                if "brand" in msgs:
+                    brand_restr = "True"
+                if "NOT_ELIGIBLE" in codes and "APPROVAL_REQUIRED" not in codes:
+                    selling_restr = "not eligible"
+                else:
+                    selling_restr = "approval required"
+        except Exception:
+            pass
 
+    if selling_restr == "approval required":
+        selling_link = f"https://sellercentral.amazon.com/hz/approvalrequest/restrictions/approve?asin={asin}"
+    else:
+        selling_link = None
+
+    # 4. Fetch Page Details (Reviews + Fallback Rank / Parent ASIN / Price)
     page_details = fetch_amazon_page_details(asin)
     customer_reviews = page_details["customer_reviews"]
     avg_rating = page_details["average_rating"]
     rev_count = page_details["review_count"]
 
-    # Fill in any missing main category / rank from live page details
-    if (sales_rank is None or category in ("Unknown", "Beauty & Personal Care", "")) and page_details.get("main_sales_rank"):
+    if not parent_asin and page_details.get("parent_asin"):
+        parent_asin = page_details["parent_asin"]
+
+    # Fill in any missing main category / rank from live page details (never overwrite valid SP-API rank)
+    if sales_rank is None and page_details.get("main_sales_rank"):
         sales_rank = page_details["main_sales_rank"]
-        if page_details.get("main_category"):
-            category = page_details["main_category"]
+    if category in ("Unknown", "", None) and page_details.get("main_category"):
+        category = page_details["main_category"]
 
     # Fill in any missing sub category / sub rank from live page details
-    if (sub_category_sales_rank is None) and page_details.get("sub_sales_rank"):
+    if sub_category_sales_rank is None and page_details.get("sub_sales_rank"):
         sub_category_sales_rank = page_details["sub_sales_rank"]
-        if page_details.get("sub_category"):
+        if page_details.get("sub_category") and not sub_category:
             sub_category = page_details["sub_category"]
-    elif (sub_category is None or sub_category == "") and page_details.get("sub_category"):
+    elif not sub_category and page_details.get("sub_category"):
         sub_category = page_details["sub_category"]
+
+    # Price resolution hierarchy: Buybox > Lowest FBA > Lowest FBM > Live Page Price > Catalog List Price
+    sell_price = (
+        buybox_landed
+        if buybox_landed is not None
+        else (
+            lowest_fba
+            if lowest_fba is not None
+            else (
+                lowest_fbm
+                if lowest_fbm is not None
+                else (page_details.get("price") or catalog_list_price)
+            )
+        )
+    )
+    if buybox_landed is None and page_details.get("price"):
+        buybox_landed = page_details["price"]
+
+    # Clean URLs (no Excel formula wrapper so CSV and Database receive clean links)
+    amazon_link = f"https://www.amazon.com/dp/{asin}"
+    keepa_link = f"https://keepa.com/#!product/1-{asin}"
+    camel_link = f"https://camelcamelcamel.com/search?sq={asin}"
 
     est_sales = estimate_monthly_sales(sales_rank, category)
 
@@ -975,7 +1361,7 @@ def fetch_amazon_item_data(
         "favorite": "False",
         "product_id": prod_id if prod_id else item.get("asin", clean_id),
         "brand": brand,
-        "brand_restriction": "False",
+        "brand_restriction": brand_restr,
         "selling_restriction": selling_restr,
         "selling_restriction_link": selling_link,
         "title": title,
@@ -1000,7 +1386,9 @@ def fetch_amazon_item_data(
         "manufacturer": mfg,
         "color": color,
         "model": model,
+        "size": size,
         "part_number": part_num,
+        "material": material,
         "is_hazmat": hazmat,
         "keepa": keepa_link,
         "camelcc": camel_link,
@@ -1127,7 +1515,9 @@ def build_full_target_row(
         "Manufacturer": item_data.get("manufacturer", ""),
         "Color": item_data.get("color", ""),
         "Model": item_data.get("model", ""),
+        "Size": item_data.get("size", ""),
         "Part Number": item_data.get("part_number", ""),
+        "Material": item_data.get("material", ""),
         "Is Hazmat": item_data.get("is_hazmat", "False"),
         "Keepa": item_data.get("keepa", ""),
         "CamelCC": item_data.get("camelcc", ""),

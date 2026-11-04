@@ -163,6 +163,12 @@ def _clean_sql_value(col: str, val: Any) -> Any:
             return 1
         return 0
 
+    # Strip Excel =HYPERLINK("url", "label") formulas if present in legacy exports
+    if s_val.upper().startswith("=HYPERLINK("):
+        m_link = re.search(r'=HYPERLINK\(\s*"([^"]+)"', s_val, re.IGNORECASE)
+        if m_link:
+            return m_link.group(1).strip()
+
     return s_val
 
 
