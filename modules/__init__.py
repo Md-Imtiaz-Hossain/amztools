@@ -26,5 +26,5 @@ Multi-Module Architecture:
    - Provides an interactive dashboard for users to inspect historical analyses and leads.
 """
 
-__version__ = "2.0.0"
-__all__ = ["entrypoint", "analyzer", "uploader", "crud"]
+__version__ = "2.1.0"
+__all__ = ["entrypoint", "analyzer", "uploader", "crud", "mysql_uploader"]

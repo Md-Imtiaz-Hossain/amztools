@@ -24,6 +24,11 @@ TRACKED_CREDENTIAL_KEYS: List[str] = [
     "cf_account_id",
     "cf_database_id",
     "cf_api_token",
+    "mysql_host",
+    "mysql_port",
+    "mysql_database",
+    "mysql_user",
+    "mysql_password",
     "wholesaler_company_name",
 ]
 

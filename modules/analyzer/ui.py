@@ -147,7 +147,7 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
 
     # 4. Export & Next Module Buttons
     st.markdown("### 📥 Export & Next Module")
-    d_col1, d_col2, d_col3 = st.columns(3)
+    d_col1, d_col2, d_col3, d_col4 = st.columns(4)
 
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     with d_col1:
@@ -189,11 +189,16 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
             use_container_width=True,
         )
 
-
     with d_col3:
         if st.button("☁️ Send Data to Module 3 (Cloudflare D1)", type="secondary", key=f"{prefix}_send_to_uploader_btn", use_container_width=True):
             st.session_state["pending_d1_upload"] = filtered_df
             st.session_state["active_module"] = "uploader"
+            st.rerun()
+
+    with d_col4:
+        if st.button("🐬 Send Data to Module 5 (MySQL Remote DB)", type="secondary", key=f"{prefix}_send_to_mysql_uploader_btn", use_container_width=True):
+            st.session_state["pending_mysql_upload"] = filtered_df
+            st.session_state["active_module"] = "mysql_uploader"
             st.rerun()
 
 

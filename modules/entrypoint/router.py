@@ -30,9 +30,10 @@ class ModuleView(str, Enum):
     Enumeration of available application modules.
     Each enum value represents a distinct page/view within the multi-module system.
     """
-    ANALYZER = "analyzer"  # Module 2: Analyze and Prepare Data
-    UPLOADER = "uploader"  # Module 3: Upload Data to Cloudflare D1 Database
-    CRUD = "crud"          # Module 4: Database CRUD Operations & Data Viewer
+    ANALYZER = "analyzer"              # Module 2: Analyze and Prepare Data
+    UPLOADER = "uploader"              # Module 3: Upload Data to Cloudflare D1 Database
+    CRUD = "crud"                      # Module 4: Database CRUD Operations & Data Viewer
+    MYSQL_UPLOADER = "mysql_uploader"  # Module 5: Upload Data to MySQL Remote Database
 
 
 class AppRouter:
@@ -96,3 +97,13 @@ class AppRouter:
             dataframe_or_filepath: Pandas DataFrame or path to exported Excel/CSV file.
         """
         self.session_state["pending_d1_upload"] = dataframe_or_filepath
+
+    def pass_data_to_mysql_uploader(self, dataframe_or_filepath: Any) -> None:
+        """
+        Store Module 2 output data in session state so Module 5 (MySQL Remote Uploader)
+        can immediately access it without requiring manual file re-upload.
+
+        Args:
+            dataframe_or_filepath: Pandas DataFrame or path to exported Excel/CSV file.
+        """
+        self.session_state["pending_mysql_upload"] = dataframe_or_filepath

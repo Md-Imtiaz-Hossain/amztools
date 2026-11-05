@@ -8,6 +8,7 @@ plotly>=5.18.0
 openpyxl>=3.1.2
 python-amazon-sp-api>=1.5.0
 
-# Module 3 & 4: Cloudflare D1 REST Client & CRUD
+# Module 3, 4 & 5: Cloudflare D1 REST Client, CRUD & Remote MySQL Uploader
 requests>=2.31.0
 python-dotenv>=1.0.0
+PyMySQL>=1.1.0

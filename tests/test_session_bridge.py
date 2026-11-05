@@ -19,6 +19,11 @@ class TestSessionBridge(unittest.TestCase):
         self.assertIn("cf_account_id", TRACKED_CREDENTIAL_KEYS)
         self.assertIn("cf_database_id", TRACKED_CREDENTIAL_KEYS)
         self.assertIn("cf_api_token", TRACKED_CREDENTIAL_KEYS)
+        self.assertIn("mysql_host", TRACKED_CREDENTIAL_KEYS)
+        self.assertIn("mysql_port", TRACKED_CREDENTIAL_KEYS)
+        self.assertIn("mysql_database", TRACKED_CREDENTIAL_KEYS)
+        self.assertIn("mysql_user", TRACKED_CREDENTIAL_KEYS)
+        self.assertIn("mysql_password", TRACKED_CREDENTIAL_KEYS)
         self.assertIn("wholesaler_company_name", TRACKED_CREDENTIAL_KEYS)
 
     @patch("modules.entrypoint.session_bridge.st")
