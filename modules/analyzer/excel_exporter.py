@@ -12,6 +12,8 @@ Purpose:
 """
 
 import io
+import os
+import shutil
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -358,10 +360,180 @@ def export_to_target_excel(rows_or_df, output_path=None):
     ws.auto_filter.ref = f"A1:{last_col_letter}{total_rows}"
 
     if output_path:
-        wb.save(output_path)
+        parent_dir = os.path.dirname(os.path.abspath(output_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        tmp_path = f"{output_path}.tmp"
+        wb.save(tmp_path)
+        os.replace(tmp_path, output_path)
         return output_path
     else:
         buffer = io.BytesIO()
         wb.save(buffer)
         buffer.seek(0)
         return buffer.getvalue()
+
+
+class IncrementalExcelAutoSaver:
+    """
+    Incremental, crash-safe Excel (.xlsx) writer that appends analyzed slots
+    (e.g., every 25 products) directly into a Target-formatted workbook and
+    atomically flushes to disk after each slot.
+
+    Benefits:
+    - O(slot_size) styling per slot: previously written rows are already in the
+      in-memory Workbook and are never re-parsed or re-styled.
+    - Atomic disk writes via temporary file replacement (.tmp -> .xlsx) so an
+      unexpected shutdown, crash, or power loss never corrupts the saved Excel file.
+    """
+
+    def __init__(self, output_path: str, existing_rows=None, mirror_path: str = None):
+        self.output_path = os.path.abspath(output_path)
+        self.mirror_path = os.path.abspath(mirror_path) if mirror_path else None
+        parent_dir = os.path.dirname(self.output_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        if self.mirror_path:
+            mirror_dir = os.path.dirname(self.mirror_path)
+            if mirror_dir:
+                os.makedirs(mirror_dir, exist_ok=True)
+
+        self.wb = openpyxl.Workbook()
+        self.ws = self.wb.active
+        self.ws.title = "Catalog Analysis"
+        self.ws.views.sheetView[0].showGridLines = True
+        self.ws.freeze_panes = "A2"
+
+        self._header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        self._header_font = Font(name="Calibri", size=10.5, bold=True, color="FFFFFF")
+        self._header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
+        self._header_border = Border(
+            left=Side(style="thin", color="17365D"),
+            right=Side(style="thin", color="17365D"),
+            top=Side(style="thin", color="17365D"),
+            bottom=Side(style="medium", color="17365D"),
+        )
+        self._cell_border = Border(
+            left=Side(style="thin", color="E2E8F0"),
+            right=Side(style="thin", color="E2E8F0"),
+            top=Side(style="thin", color="E2E8F0"),
+            bottom=Side(style="thin", color="E2E8F0"),
+        )
+        self._data_font = Font(name="Calibri", size=10, bold=False, color="1E293B")
+        self._zebra_fill = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+
+        # Write Header Row
+        self.ws.row_dimensions[1].height = 24.0
+        for col_idx, col_name in enumerate(TARGET_COLUMNS, 1):
+            cell = self.ws.cell(row=1, column=col_idx, value=col_name)
+            cell.font = self._header_font
+            cell.fill = self._header_fill
+            cell.alignment = self._header_alignment
+            cell.border = self._header_border
+            col_letter = get_column_letter(col_idx)
+            self.ws.column_dimensions[col_letter].width = COLUMN_WIDTHS.get(col_name, DEFAULT_COLUMN_WIDTH)
+
+        self.next_row_idx = 2
+        self.total_saved_rows = 0
+
+        if existing_rows is not None and len(existing_rows) > 0:
+            self.append_slot(existing_rows, flush=True)
+
+    def _style_and_write_row(self, row_idx: int, record: dict):
+        self.ws.row_dimensions[row_idx].height = 20.0
+        is_zebra = (row_idx % 2 == 1)
+
+        for col_idx, col_name in enumerate(TARGET_COLUMNS, 1):
+            val = record.get(col_name, None)
+            if col_name == "Analyzing Software Name" and (
+                val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip().lower() in ("nan", "none", "")
+            ):
+                val = "InternalAMZ"
+
+            cell = self.ws.cell(row=row_idx, column=col_idx)
+            cell.font = self._data_font
+            cell.border = self._cell_border
+            if is_zebra:
+                cell.fill = self._zebra_fill
+
+            if col_name in RIGHT_ALIGNED_COLUMNS:
+                h_align = "right"
+            elif col_name in CENTER_ALIGNED_COLUMNS:
+                h_align = "center"
+            else:
+                h_align = "left"
+
+            if val is None or (isinstance(val, float) and pd.isna(val)) or str(val).strip().lower() == "nan":
+                cell.value = None
+            else:
+                if col_name in (
+                    "Product ID", "ASIN", "Parent ASIN", "Wholesaller Company Name", "Analyzing Software Name",
+                    "Customer Reviews", "About this item", "Title", "Brand", "Category", "Sub Category"
+                ) and not isinstance(val, str):
+                    val = str(val)
+
+                if isinstance(val, str) and ("\n" in val or "\r" in val):
+                    cleaned_lines = [
+                        p.strip() for p in val.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+                        if p.strip()
+                    ]
+                    val = " | ".join(cleaned_lines)
+
+                if col_name in INTEGER_COLUMNS:
+                    try:
+                        val = int(round(float(val)))
+                    except (ValueError, TypeError):
+                        pass
+                elif isinstance(val, float):
+                    val = round(val, 3)
+
+                cell.value = val
+                if col_name in COLUMN_NUMBER_FORMATS:
+                    cell.number_format = COLUMN_NUMBER_FORMATS[col_name]
+
+            cell.alignment = Alignment(horizontal=h_align, vertical="center", wrap_text=False)
+
+    def append_slot(self, slot_rows, flush: bool = True) -> int:
+        """
+        Appends a list of row dicts (or DataFrame) to the workbook, atomically saves to disk,
+        and returns the cumulative count of saved rows.
+        """
+        if hasattr(slot_rows, "to_dict"):
+            records = slot_rows.to_dict(orient="records")
+        else:
+            records = [dict(r) for r in (slot_rows or [])]
+
+        if not records:
+            return self.total_saved_rows
+
+        for r in records:
+            if not r.get("Analyzing Software Name") or (
+                isinstance(r.get("Analyzing Software Name"), float) and pd.isna(r.get("Analyzing Software Name"))
+            ):
+                r["Analyzing Software Name"] = "InternalAMZ"
+            self._style_and_write_row(self.next_row_idx, r)
+            self.next_row_idx += 1
+            self.total_saved_rows += 1
+
+        last_col_letter = get_column_letter(len(TARGET_COLUMNS))
+        self.ws.auto_filter.ref = f"A1:{last_col_letter}{max(1, self.next_row_idx - 1)}"
+
+        if flush:
+            self.flush()
+        return self.total_saved_rows
+
+    def flush(self) -> str:
+        """
+        Atomically writes the current workbook state to output_path (and optional mirror_path).
+        """
+        tmp_path = f"{self.output_path}.tmp"
+        self.wb.save(tmp_path)
+        os.replace(tmp_path, self.output_path)
+
+        if self.mirror_path and self.mirror_path != self.output_path:
+            try:
+                shutil.copy2(self.output_path, self.mirror_path)
+            except Exception:
+                pass
+        return self.output_path
+

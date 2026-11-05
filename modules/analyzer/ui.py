@@ -16,6 +16,7 @@ Purpose:
 
 import datetime
 import os
+import re
 import pandas as pd
 import streamlit as st
 
@@ -28,7 +29,29 @@ from .sp_api_client import (
     build_full_target_row,
     test_lwa_connection,
 )
-from .excel_exporter import export_to_target_excel
+from .excel_exporter import export_to_target_excel, IncrementalExcelAutoSaver
+
+AUTOSAVE_SLOT_SIZE = 25
+
+
+def _sanitize_filename(value: str, fallback: str = "catalog") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip()).strip("_.")
+    return cleaned[:80] if cleaned else fallback
+
+
+def _get_autosave_paths(project_root: str, catalog_name: str, wholesaler_name: str = "") -> tuple[str, str]:
+    exports_dir = os.path.join(project_root, "exports")
+    os.makedirs(exports_dir, exist_ok=True)
+    base_cat = os.path.splitext(os.path.basename(catalog_name or "catalog"))[0]
+    safe_cat = _sanitize_filename(base_cat, "catalog")
+    safe_wh = _sanitize_filename(wholesaler_name, "")
+    if safe_wh:
+        ckpt_filename = f"autosave_{safe_wh}_{safe_cat}.xlsx"
+    else:
+        ckpt_filename = f"autosave_{safe_cat}.xlsx"
+    checkpoint_path = os.path.join(exports_dir, ckpt_filename)
+    latest_path = os.path.join(exports_dir, "latest_bulk_analysis_autosave.xlsx")
+    return checkpoint_path, latest_path
 
 
 DISPLAY_COLS = [
@@ -506,10 +529,65 @@ def render_analyzer_ui():
                 if sample_costs:
                     st.caption(f"Sample Unit Costs: `{', '.join(sample_costs)}`")
 
+            active_wholesaler = st.session_state.get("wholesaler_company_name", "").strip()
+            catalog_name = uploaded_file.name if uploaded_file is not None else "sample_supplier_catalog.csv"
+            checkpoint_xlsx_path, latest_xlsx_path = _get_autosave_paths(
+                project_root, catalog_name, active_wholesaler
+            )
+
+            # Check if an auto-saved Excel checkpoint exists from a previous/interrupted run
+            existing_ckpt_df = None
+            active_ckpt_file = None
+            if os.path.exists(checkpoint_xlsx_path):
+                active_ckpt_file = checkpoint_xlsx_path
+            elif os.path.exists(latest_xlsx_path):
+                active_ckpt_file = latest_xlsx_path
+
+            if active_ckpt_file:
+                try:
+                    existing_ckpt_df = pd.read_excel(active_ckpt_file, engine="openpyxl")
+                except Exception:
+                    existing_ckpt_df = None
+
+            resume_from_saved = False
+            if existing_ckpt_df is not None and not existing_ckpt_df.empty:
+                saved_count = len(existing_ckpt_df)
+                st.info(
+                    f"💾 **Auto-Saved Excel Found on Disk:** `{os.path.basename(active_ckpt_file)}` "
+                    f"contains **{saved_count}** already-analyzed rows (saved automatically every {AUTOSAVE_SLOT_SIZE} items)."
+                )
+                rec_col1, rec_col2, rec_col3 = st.columns([1.2, 1.2, 1.6])
+                with rec_col1:
+                    with open(active_ckpt_file, "rb") as f_xlsx:
+                        st.download_button(
+                            label=f"📥 Download Saved Excel ({saved_count} rows)",
+                            data=f_xlsx.read(),
+                            file_name=os.path.basename(active_ckpt_file),
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_autosave_ckpt_btn",
+                            use_container_width=True,
+                        )
+                with rec_col2:
+                    if st.button(
+                        f"📂 Load {saved_count} Saved Rows into Results",
+                        key="load_autosave_ckpt_btn",
+                        use_container_width=True,
+                    ):
+                        st.session_state["bulk_analysis_results"] = existing_ckpt_df
+                        st.session_state["bulk_autosave_path"] = active_ckpt_file
+                        st.rerun()
+                with rec_col3:
+                    if active_ckpt_file == checkpoint_xlsx_path and saved_count < len(df):
+                        resume_from_saved = st.checkbox(
+                            f"Resume from Row {saved_count + 1} (keep first {saved_count} rows)",
+                            value=True,
+                            key="analyzer_resume_from_autosave",
+                            help="When checked, clicking Run will keep the already-saved rows and continue analyzing from the next unanalyzed row.",
+                        )
+
             # Action Button
             action_label = "🚀 Run Demo Catalog Analysis" if is_demo else "🚀 Run Live SP-API Catalog Analysis"
             if st.button(action_label, type="primary", key="analyzer_run_btn"):
-                active_wholesaler = st.session_state.get("wholesaler_company_name", "").strip()
                 if not active_wholesaler:
                     st.error("⚠️ **Wholesaler Company Name is required!** Please type the Wholesaler Company Name in the sidebar before starting.")
                 elif not is_demo and (not client_id or not client_secret or not refresh_token):
@@ -521,21 +599,54 @@ def render_analyzer_ui():
                         "lwa_client_secret": client_secret.strip(),
                     }
 
+                    checkpoint_xlsx_path, latest_xlsx_path = _get_autosave_paths(
+                        project_root, catalog_name, active_wholesaler
+                    )
+
+                    start_idx = 0
                     analyzed_rows = []
-                    progress_bar = st.progress(0.0)
+                    if (
+                        resume_from_saved
+                        and existing_ckpt_df is not None
+                        and not existing_ckpt_df.empty
+                        and len(existing_ckpt_df) < len(df)
+                    ):
+                        analyzed_rows = existing_ckpt_df.to_dict(orient="records")
+                        start_idx = len(analyzed_rows)
+
+                    auto_saver = IncrementalExcelAutoSaver(
+                        output_path=checkpoint_xlsx_path,
+                        existing_rows=analyzed_rows if analyzed_rows else None,
+                        mirror_path=latest_xlsx_path,
+                    )
+
+                    slot_buffer = []
+                    progress_bar = st.progress(start_idx / len(df) if len(df) > 0 else 0.0)
                     status_text = st.empty()
+                    autosave_status = st.empty()
                     total_rows = len(df)
                     run_time = datetime.datetime.now()
 
-                    for index, row in df.iterrows():
+                    if start_idx > 0:
+                        autosave_status.info(
+                            f"🔄 Resuming from row {start_idx + 1}/{total_rows} "
+                            f"({start_idx} rows already preserved in `{os.path.basename(checkpoint_xlsx_path)}`)."
+                        )
+
+                    for pos_idx in range(start_idx, total_rows):
+                        row = df.iloc[pos_idx]
                         raw_id = row.get(upc_col, "")
                         raw_cost = clean_cost(row.get(cost_col, 0.0))
 
                         clean_id, id_type = clean_identifier(raw_id)
-                        current_num = index + 1
-                        
-                        # Throttle UI progress updates to prevent websocket flooding on large datasets
-                        if current_num == 1 or current_num % 25 == 0 or current_num == total_rows:
+                        current_num = pos_idx + 1
+
+                        # Update UI progress every 25 rows (or first/last row)
+                        if (
+                            current_num == start_idx + 1
+                            or current_num % AUTOSAVE_SLOT_SIZE == 0
+                            or current_num == total_rows
+                        ):
                             status_text.text(f"Analyzing {current_num}/{total_rows}: {clean_id or 'Item'}...")
                             progress_bar.progress(current_num / total_rows)
 
@@ -560,10 +671,30 @@ def render_analyzer_ui():
                         )
 
                         analyzed_rows.append(target_row)
+                        slot_buffer.append(target_row)
+
+                        # Immediately save to Excel after every 25 items (or at final row)
+                        if (
+                            len(slot_buffer) >= AUTOSAVE_SLOT_SIZE
+                            or current_num % AUTOSAVE_SLOT_SIZE == 0
+                            or current_num == total_rows
+                        ):
+                            saved_total = auto_saver.append_slot(slot_buffer, flush=True)
+                            slot_buffer.clear()
+                            st.session_state["bulk_analysis_results"] = pd.DataFrame(analyzed_rows)
+                            st.session_state["bulk_autosave_path"] = checkpoint_xlsx_path
+                            slot_number = (saved_total + AUTOSAVE_SLOT_SIZE - 1) // AUTOSAVE_SLOT_SIZE
+                            autosave_status.success(
+                                f"💾 **Slot {slot_number} Auto-Saved to Excel:** "
+                                f"`{saved_total}/{total_rows}` rows safely written to `{checkpoint_xlsx_path}`"
+                            )
 
                     progress_bar.progress(1.0)
-                    status_text.text("Analysis complete! Full target dataset generated.")
+                    status_text.text(
+                        f"Analysis complete! All {len(analyzed_rows)} rows saved to {os.path.basename(checkpoint_xlsx_path)}."
+                    )
                     st.session_state["bulk_analysis_results"] = pd.DataFrame(analyzed_rows)
+                    st.session_state["bulk_autosave_path"] = checkpoint_xlsx_path
 
         # Self-contained Bulk Search Output & Export Section
         if "bulk_analysis_results" in st.session_state and not st.session_state["bulk_analysis_results"].empty:
