@@ -29,6 +29,9 @@ class TestRouterAndModels(unittest.TestCase):
         router.pass_data_to_mysql_uploader(["sample_row"])
         self.assertEqual(state.get("pending_mysql_upload"), ["sample_row"])
 
+        router.navigate_to(ModuleView.MYSQL_CRUD)
+        self.assertEqual(router.get_active_module(), ModuleView.MYSQL_CRUD)
+
 
     def test_product_model_from_d1_row(self):
         row_dict = {

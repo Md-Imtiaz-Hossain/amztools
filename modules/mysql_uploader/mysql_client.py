@@ -322,3 +322,25 @@ class MySQLRemoteClient:
             )
         except Exception as e:
             return False, f"Failed initializing MySQL schema: {e}"
+
+    def ensure_columns_exist(self, columns: List[str]) -> None:
+        """
+        Ensures that every column present in an uploaded CSV/Excel file exists in the
+        MySQL `wholesale_products` table, adding any extra custom columns as `TEXT NULL`
+        so 100% of external CSV columns and rows can be written without error.
+        """
+        if not columns:
+            return
+        try:
+            conn = self._get_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SHOW COLUMNS FROM wholesale_products;")
+                existing_cols = {row["Field"].lower() for row in (cursor.fetchall() or [])}
+                for col in columns:
+                    clean_col = str(col).strip()
+                    if clean_col and clean_col.lower() not in existing_cols:
+                        cursor.execute(f"ALTER TABLE wholesale_products ADD COLUMN `{clean_col}` TEXT NULL;")
+                        existing_cols.add(clean_col.lower())
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"Could not auto-add extra columns to MySQL wholesale_products: {e}")

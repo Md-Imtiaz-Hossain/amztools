@@ -34,6 +34,7 @@ class ModuleView(str, Enum):
     UPLOADER = "uploader"              # Module 3: Upload Data to Cloudflare D1 Database
     CRUD = "crud"                      # Module 4: Database CRUD Operations & Data Viewer
     MYSQL_UPLOADER = "mysql_uploader"  # Module 5: Upload Data to MySQL Remote Database
+    MYSQL_CRUD = "mysql_crud"          # Module 6: Remote MySQL Database CRUD Operations & Viewer
 
 
 class AppRouter:

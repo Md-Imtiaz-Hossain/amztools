@@ -219,17 +219,8 @@ def load_supplier_file(uploaded_file):
         file_name = getattr(uploaded_file, "name", str(uploaded_file)).lower()
 
         if file_name.endswith(".csv"):
-            for encoding in ["utf-8", "utf-8-sig", "latin1", "cp1252"]:
-                try:
-                    if hasattr(uploaded_file, "seek"):
-                        uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, encoding=encoding, dtype=str)
-                    return _promote_header_row_if_needed(df)
-                except UnicodeDecodeError:
-                    continue
-            if hasattr(uploaded_file, "seek"):
-                uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, dtype=str)
+            from modules.uploader.file_parser import _read_csv_all_rows
+            df = _read_csv_all_rows(uploaded_file)
             return _promote_header_row_if_needed(df)
         else:
             if hasattr(uploaded_file, "seek"):

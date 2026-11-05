@@ -120,24 +120,13 @@ class MySQLUploaderService:
             }
 
         integrity = validate_record_integrity(records)
-        valid_records = [
-            r for r in records
-            if r.get("asin") and str(r.get("asin")).upper() != "NOT_FOUND"
-        ]
-
-        if not valid_records:
-            return {
-                "success": False,
-                "total_processed": len(records),
-                "uploaded_count": 0,
-                "failed_count": len(records),
-                "total_slots": 0,
-                "completed_slots": 0,
-                "slot_size": slot_size,
-                "slot_logs": [],
-                "elapsed_seconds": round(time.time() - start_time, 2),
-                "errors": ["None of the records contained a valid Amazon ASIN."],
-            }
+        # Upload 100% of parsed records without filtering or deleting any rows
+        valid_records = list(records)
+        for r in valid_records:
+            if r.get("asin") is None:
+                r["asin"] = str(r.get("product_id") or "")
+            if not r.get("wholesaler_company_name"):
+                r["wholesaler_company_name"] = wholesaler_name or "Default Wholesale"
 
         if self.client:
             if auto_init_schema:
@@ -147,6 +136,11 @@ class MySQLUploaderService:
                 if not schema_ok:
                     logger.warning(f"MySQL Schema init note: {schema_msg}")
                     errors.append(f"Schema initialization warning: {schema_msg}")
+
+            # Ensure all columns from the uploaded file exist in the MySQL table
+            if getattr(self.client, "ensure_columns_exist", None) and valid_records:
+                sample_cols = [c for c in valid_records[0].keys() if c != "id"]
+                self.client.ensure_columns_exist(sample_cols)
 
             if clear_existing == "all":
                 if progress_callback:

@@ -65,6 +65,7 @@ def render_entrypoint_app():
         ModuleView.UPLOADER.value: "☁️ Module 3: Upload to Cloudflare D1",
         ModuleView.CRUD.value: "🗄️ Module 4: Database CRUD & Viewer",
         ModuleView.MYSQL_UPLOADER.value: "🐬 Module 5: Upload to MySQL Remote DB",
+        ModuleView.MYSQL_CRUD.value: "🗄️ Module 6: MySQL Database CRUD & Viewer",
     }
 
     current_module = router.get_active_module()
@@ -115,3 +116,8 @@ def render_entrypoint_app():
         # Module 5: Upload Data to MySQL Remote DB
         from modules.mysql_uploader.ui import render_mysql_uploader_ui
         render_mysql_uploader_ui()
+
+    elif current_module == ModuleView.MYSQL_CRUD:
+        # Module 6: Remote MySQL Database CRUD Operations & Viewer
+        from modules.mysql_crud.ui import render_mysql_crud_ui
+        render_mysql_crud_ui()

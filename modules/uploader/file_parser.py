@@ -13,6 +13,8 @@ Responsibilities:
 """
 
 from typing import Any, Dict, List, Union
+import csv
+import io
 import re
 import datetime
 import pandas as pd
@@ -172,17 +174,180 @@ def _clean_sql_value(col: str, val: Any) -> Any:
     return s_val
 
 
+def _parse_single_csv_line_lenient(line: str, expected_cols: int) -> List[str]:
+    """
+    Parses a single physical CSV line safely even when it contains stray/unescaped quotes
+    (such as 12" inch marks in titles) without ever swallowing subsequent lines.
+    """
+    if line.count('"') % 2 == 0:
+        try:
+            row = next(csv.reader([line]))
+            if expected_cols <= 0 or len(row) == expected_cols:
+                return row
+        except Exception:
+            pass
+
+    fields: List[str] = []
+    n = len(line)
+    i = 0
+    while i <= n:
+        if i == n:
+            if line.endswith(","):
+                fields.append("")
+            break
+        if line[i] == '"':
+            close_idx = -1
+            j = i + 1
+            while j < n:
+                if line[j] == '"':
+                    if j + 1 < n and line[j + 1] == '"':
+                        j += 2
+                        continue
+                    if j + 1 == n or line[j + 1] == ",":
+                        close_idx = j
+                        break
+                j += 1
+            if close_idx != -1:
+                fields.append(line[i + 1 : close_idx].replace('""', '"'))
+                i = close_idx + 2
+                continue
+        next_comma = line.find(",", i)
+        if next_comma == -1:
+            fields.append(line[i:])
+            break
+        else:
+            fields.append(line[i:next_comma])
+            i = next_comma + 1
+
+    if expected_cols > 0:
+        if len(fields) < expected_cols:
+            fields.extend([""] * (expected_cols - len(fields)))
+        elif len(fields) > expected_cols:
+            fields = fields[: expected_cols - 1] + [",".join(fields[expected_cols - 1 :])]
+    return fields
+
+
+def _read_csv_all_rows(source: Any) -> pd.DataFrame:
+    """
+    Reads 100% of rows from a CSV file (filepath or file-like object).
+    Prevents pandas/csv from swallowing thousands of rows when product titles or descriptions
+    contain unescaped double quotes (e.g. 12" inch marks) or skipping blank/ragged rows.
+    """
+    raw_bytes = None
+    if isinstance(source, str):
+        with open(source, "rb") as f:
+            raw_bytes = f.read()
+    elif hasattr(source, "read"):
+        if hasattr(source, "seek"):
+            source.seek(0)
+        raw_data = source.read()
+        if isinstance(raw_data, bytes):
+            raw_bytes = raw_data
+        else:
+            raw_bytes = str(raw_data).encode("utf-8", errors="replace")
+        if hasattr(source, "seek"):
+            source.seek(0)
+
+    if raw_bytes is None:
+        return pd.read_csv(source, dtype=str, keep_default_na=False, skip_blank_lines=False)
+
+    text_content = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+        try:
+            text_content = raw_bytes.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text_content is None:
+        text_content = raw_bytes.decode("utf-8", errors="replace")
+
+    lines = text_content.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    if not lines:
+        return pd.DataFrame()
+
+    expected_data_rows = max(0, len(lines) - 1)
+
+    # First attempt fast pandas read with skip_blank_lines=False
+    df = None
+    try:
+        df = pd.read_csv(
+            io.StringIO(text_content),
+            dtype=str,
+            keep_default_na=False,
+            skip_blank_lines=False,
+            on_bad_lines="warn",
+        )
+    except Exception:
+        df = None
+
+    # If pandas read all physical data lines without swallowing any rows, return it directly
+    if df is not None and len(df) == expected_data_rows:
+        return df
+
+    # Check if pandas merged rows due to unescaped quotes (any row having > num_cols or fewer rows than lines)
+    header = _parse_single_csv_line_lenient(lines[0], 0)
+    num_cols = len(header)
+    if num_cols == 0:
+        return df if df is not None else pd.DataFrame()
+
+    rows: List[List[str]] = []
+    idx = 1
+    total_lines = len(lines)
+    while idx < total_lines:
+        line = lines[idx]
+        if line.count('"') % 2 == 0:
+            rows.append(_parse_single_csv_line_lenient(line, num_cols))
+            idx += 1
+            continue
+
+        # Line has an odd number of quotes: check if it is a genuine multi-line record
+        # (where joining up to 15 lines produces a balanced CSV row with EXACTLY num_cols fields)
+        # vs a single-line row with an unescaped quote (like 12" inch mark).
+        single_attempt = _parse_single_csv_line_lenient(line, 0)
+        if len(single_attempt) >= num_cols:
+            # Already has all columns on this single line -> stray quote on a single-line row!
+            rows.append(_parse_single_csv_line_lenient(line, num_cols))
+            idx += 1
+            continue
+
+        matched_multiline = False
+        combined = line
+        max_lookahead = min(total_lines, idx + 15)
+        for next_idx in range(idx + 1, max_lookahead):
+            combined = combined + "\n" + lines[next_idx]
+            if combined.count('"') % 2 == 0:
+                try:
+                    parsed_multi = next(csv.reader([combined]))
+                    if len(parsed_multi) == num_cols:
+                        rows.append(parsed_multi)
+                        idx = next_idx + 1
+                        matched_multiline = True
+                except Exception:
+                    pass
+                break
+
+        if not matched_multiline:
+            rows.append(_parse_single_csv_line_lenient(line, num_cols))
+            idx += 1
+
+    return pd.DataFrame(rows, columns=header)
+
+
 def parse_and_validate_analysis_file(
     source: Union[pd.DataFrame, str, Any]
 ) -> List[Dict[str, Any]]:
     """
     Parse an analysis file or DataFrame and produce sanitized database records.
+    Preserves 100% of rows from the source file without filtering or dropping any records.
 
     Args:
         source: A pandas DataFrame, file path, or uploaded file buffer.
 
     Returns:
-        List[Dict[str, Any]]: List of dictionary rows matching SQLite table schema.
+        List[Dict[str, Any]]: List of dictionary rows ready for database insertion.
     """
     if source is None:
         return []
@@ -191,59 +356,60 @@ def parse_and_validate_analysis_file(
     if isinstance(source, list):
         return source
 
-    # 1. Ingest into DataFrame
+    # 1. Ingest into DataFrame (preserving 100% of rows)
     if isinstance(source, pd.DataFrame):
         df = source.copy()
     else:
-        # File path or Streamlit UploadedFile
         file_name = getattr(source, "name", str(source)).lower()
         if hasattr(source, "seek"):
             source.seek(0)
 
         if file_name.endswith(".csv"):
-            for encoding in ["utf-8", "utf-8-sig", "latin1", "cp1252"]:
-                try:
-                    if hasattr(source, "seek"):
-                        source.seek(0)
-                    df = pd.read_csv(source, encoding=encoding)
-                    break
-                except UnicodeDecodeError:
-                    continue
+            df = _read_csv_all_rows(source)
         else:
             if hasattr(source, "seek"):
                 source.seek(0)
-            df = pd.read_excel(source)
+            df = pd.read_excel(source, dtype=str, keep_default_na=False)
 
     if df.empty:
         return []
 
     # 2. Map Columns to SQL names
-    sql_records = []
     df_cols = list(df.columns)
-
-    # Pre-map header lookups
     col_mapping = {}
+    used_sql_cols = set()
     for col in df_cols:
         cleaned_header = str(col).strip()
         if cleaned_header in TARGET_TO_SQL_COLUMN_MAP:
-            col_mapping[col] = TARGET_TO_SQL_COLUMN_MAP[cleaned_header]
+            sql_col = TARGET_TO_SQL_COLUMN_MAP[cleaned_header]
         else:
-            # Fallback snake_case
             snake = re.sub(r"[^\w]+", "_", cleaned_header.lower()).strip("_")
-            col_mapping[col] = snake
+            sql_col = snake if snake else f"col_{len(col_mapping) + 1}"
+        # Avoid duplicate SQL column names if two CSV headers normalize to the same name
+        if sql_col in used_sql_cols and cleaned_header not in TARGET_TO_SQL_COLUMN_MAP:
+            sql_col = f"{sql_col}_{len(col_mapping) + 1}"
+        used_sql_cols.add(sql_col)
+        col_mapping[col] = sql_col
 
-    for _, row in df.iterrows():
-        record = {}
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    raw_records = df.to_dict(orient="records")
+    sql_records: List[Dict[str, Any]] = []
+
+    for row in raw_records:
+        record: Dict[str, Any] = {}
         for original_col, sql_col in col_mapping.items():
             raw_val = row.get(original_col)
             record[sql_col] = _clean_sql_value(sql_col, raw_val)
 
-        # Fallback defaults for primary required fields
+        # Fallback defaults for primary fields so no row is ever rejected by the DB
         if not record.get("asin"):
-            # Check if Product ID can serve as ASIN if 10 chars starting with B
             p_id = str(record.get("product_id") or "").strip().upper()
             if len(p_id) == 10 and p_id.startswith("B"):
                 record["asin"] = p_id
+            elif p_id:
+                record["asin"] = p_id
+            else:
+                record["asin"] = ""
 
         if not record.get("wholesaler_company_name"):
             record["wholesaler_company_name"] = "Default Wholesale"
@@ -251,9 +417,8 @@ def parse_and_validate_analysis_file(
         if not record.get("analyzing_software_name"):
             record["analyzing_software_name"] = "InternalAMZ"
 
-        # Timestamp tracking
         if not record.get("last_run"):
-            record["last_run"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            record["last_run"] = now_str
 
         sql_records.append(record)
 

@@ -27,4 +27,4 @@ Multi-Module Architecture:
 """
 
 __version__ = "2.1.0"
-__all__ = ["entrypoint", "analyzer", "uploader", "crud", "mysql_uploader"]
+__all__ = ["entrypoint", "analyzer", "uploader", "crud", "mysql_uploader", "mysql_crud"]

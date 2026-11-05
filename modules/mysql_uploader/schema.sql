@@ -10,11 +10,11 @@ CREATE TABLE IF NOT EXISTS wholesale_products (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
 
     -- Identification & Supplier
-    asin VARCHAR(32) NOT NULL,
-    parent_asin VARCHAR(32) NULL,
+    asin VARCHAR(64) DEFAULT '',
+    parent_asin VARCHAR(64) NULL,
     product_id VARCHAR(64) NULL,
     favorite TINYINT(1) DEFAULT 0,
-    wholesaler_company_name VARCHAR(255) NOT NULL,
+    wholesaler_company_name VARCHAR(255) DEFAULT 'Default Wholesale',
 
     -- Product Metadata
     brand VARCHAR(255) NULL,

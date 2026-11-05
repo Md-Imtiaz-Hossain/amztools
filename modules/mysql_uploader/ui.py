@@ -210,29 +210,25 @@ def render_mysql_uploader_ui():
             st.error(f"Error parsing source dataset: {e}")
             return
 
-    # Metrics Row
+    # Metrics Row — all rows read from file are uploaded (zero filtering/deletion)
+    total_rows_read = len(parsed_records)
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total Rows in File", f"{integrity['total_records']:,}")
-    m2.metric("Valid Products to DB", f"{integrity['valid_count']:,}")
-    m3.metric("Missing ASINs", f"{integrity['missing_asin_count']:,}")
-    m4.metric("Unique ASINs", f"{integrity.get('unique_asin_count', integrity['valid_count']):,}")
+    m1.metric("Total Rows in File", f"{total_rows_read:,}")
+    m2.metric("Rows Ready for MySQL", f"{total_rows_read:,}")
+    m3.metric("Rows Without ASIN", f"{integrity['missing_asin_count']:,}")
+    m4.metric("Unique ASINs", f"{integrity.get('unique_asin_count', 0):,}")
     m5.metric("Variations / Same ASIN", f"{integrity.get('duplicate_asin_count', 0):,}")
 
-    if integrity["valid_count"] == 0:
-        st.error("⚠️ No valid products with recognized ASINs were found in this dataset. Please verify the file.")
+    if total_rows_read == 0:
+        st.error("⚠️ The uploaded file is empty. Please verify the file.")
         return
 
-    dup_count = integrity.get("duplicate_asin_count", 0)
-    if dup_count > 0:
-        st.info(
-            f"ℹ️ **Catalog Structure Notice**: Found **{dup_count:,} catalog items** "
-            f"sharing an ASIN with other rows (e.g. variations, different UPC barcodes, pack sizes). "
-            f"**All {integrity['valid_count']:,} records will be preserved in MySQL** "
-            f"(no rows will be merged or discarded)."
-        )
+    st.success(
+        f"✅ **Full Dataset Mode Active**: All **{total_rows_read:,} rows** read from the file will be written to your MySQL database (0 rows filtered or skipped)."
+    )
 
     effective_slot = int(st.session_state.get("mysql_slot_size", slot_size))
-    total_valid = integrity["valid_count"]
+    total_valid = total_rows_read
     estimated_slots = max(1, (total_valid + effective_slot - 1) // effective_slot)
 
     if total_valid > effective_slot:
@@ -390,12 +386,21 @@ def render_mysql_uploader_ui():
             )
 
         if report.get("success"):
+            for k in (
+                "mysql_crud_metadata_cache",
+                "mysql_crud_last_filter_sig",
+                "mysql_crud_cached_total_count",
+            ):
+                st.session_state.pop(k, None)
             st.balloons()
             st.success(
                 f"🎉 **MySQL Upload Successful!** Synchronized **{report['uploaded_count']:,} products** "
                 f"into Remote MySQL database `{active_config.database}` (table `wholesale_products`) "
                 f"across **{report.get('completed_slots', 0)} slots** in **{report.get('elapsed_seconds', 0)} seconds**."
             )
+            if st.button("🗄️ Open Module 6: View & Manage MySQL Data", type="secondary", key="goto_mysql_crud_after_upload_btn"):
+                st.session_state["active_module"] = "mysql_crud"
+                st.rerun()
             if report.get("slot_logs"):
                 with st.expander("📊 Complete Slot Breakdown Table", expanded=False):
                     summary_df = pd.DataFrame(
