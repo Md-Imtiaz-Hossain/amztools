@@ -21,7 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from .config import MARKETPLACE_MAP
-from .file_loader import load_supplier_file, detect_catalog_columns
+from .file_loader import load_supplier_file, detect_catalog_columns, detect_auxiliary_columns
 from .analytics import clean_cost
 from .sp_api_client import (
     clean_identifier,
@@ -30,6 +30,7 @@ from .sp_api_client import (
     test_lwa_connection,
 )
 from .excel_exporter import export_to_target_excel, IncrementalExcelAutoSaver
+from .report_generator import generate_analysis_report, export_analysis_report_excel
 
 AUTOSAVE_SLOT_SIZE = 25
 
@@ -86,10 +87,16 @@ COLUMN_CONFIG = {
 }
 
 
-def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
+def _render_analysis_results(
+    results_df: pd.DataFrame,
+    prefix: str = "quick",
+    supplier_df: pd.DataFrame = None,
+    upc_col: str = None,
+    cost_col: str = None,
+):
     """
-    Renders standardized metrics, preview table, and export/handoff buttons
-    for either Quick Search or Bulk Search results independently.
+    Renders standardized metrics, preview table, Post-Analysis & Pre-DB Reconciliation Report,
+    and export/handoff buttons for either Quick Search or Bulk Search results independently.
     """
     if results_df is None or results_df.empty:
         return
@@ -112,14 +119,28 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
     m5.metric("Top Profit Lead", f"${max_profit:.2f}")
 
     # 2. Interactive Filters (only when more than 1 item)
+    # Note: Default min_roi is -100 so that negative-ROI items are NOT silently dropped by default.
     filtered_df = results_df.copy()
+    only_profitable = False
+    min_roi = -100
+    min_profit = 0.0
+    selected_cat = "All Categories"
+
     if total_items > 1:
         st.subheader("🔍 Filter Wholesale Leads")
         f_col1, f_col2, f_col3, f_col4 = st.columns(4)
         with f_col1:
             only_profitable = st.checkbox("Only show profitable (Profit > $0)", value=False, key=f"{prefix}_filter_prof")
         with f_col2:
-            min_roi = st.slider("Minimum ROI (%)", min_value=-50, max_value=150, value=0, step=5, key=f"{prefix}_filter_roi")
+            min_roi = st.slider(
+                "Minimum ROI (%)",
+                min_value=-100,
+                max_value=150,
+                value=-100,
+                step=5,
+                help="Set to -100% to include all analyzed products (including negative ROI). Increase to filter by ROI threshold.",
+                key=f"{prefix}_filter_roi",
+            )
         with f_col3:
             min_profit = st.number_input("Minimum Net Profit ($)", value=0.0, step=1.0, key=f"{prefix}_filter_profit")
         with f_col4:
@@ -128,7 +149,7 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
 
         if only_profitable:
             filtered_df = filtered_df[filtered_df["Profit ($)"].notnull() & (filtered_df["Profit ($)"] > 0)]
-        if min_roi > -50:
+        if min_roi > -100:
             filtered_df = filtered_df[filtered_df["ROI (%)"].isnull() | (filtered_df["ROI (%)"] >= (min_roi / 100.0))]
         if min_profit > 0:
             filtered_df = filtered_df[filtered_df["Profit ($)"].isnull() | (filtered_df["Profit ($)"] >= min_profit)]
@@ -145,24 +166,127 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
         use_container_width=True,
     )
 
-    # 4. Export & Next Module Buttons
-    st.markdown("### 📥 Export & Next Module")
+    # 4. Single Live API Analysis Report (Success vs Not success & Why)
+    st.markdown("---")
+    st.subheader("📋 Live Analysis Report")
+    st.caption(
+        "Shows which rows succeeded in fetching data via the Amazon API and which rows were unable to be analyzed and why."
+    )
+
+    report_data = generate_analysis_report(
+        results_df=results_df,
+        supplier_df=supplier_df,
+        upc_col=upc_col,
+        cost_col=cost_col,
+    )
+    rep_summary = report_data["summary"]
+    report_df = report_data["report_df"]
+    report_lines = report_data["report_lines"]
+
+    r_col1, r_col2, r_col3 = st.columns(3)
+    r_col1.metric("Total Rows", rep_summary["total_rows"])
+    r_col2.metric("✅ Success", rep_summary["success_count"])
+    r_col3.metric("❌ Not success", rep_summary["not_success_count"])
+
+    view_filter = st.radio(
+        "Filter Report Rows:",
+        [
+            f"All Rows ({rep_summary['total_rows']})",
+            f"Not success Only ({rep_summary['not_success_count']})",
+            f"Success Only ({rep_summary['success_count']})",
+        ],
+        horizontal=True,
+        key=f"{prefix}_report_view_filter",
+    )
+
+    if view_filter.startswith("Not success"):
+        display_report_df = report_df[report_df["Status"] == "Not success"].copy()
+    elif view_filter.startswith("Success"):
+        display_report_df = report_df[report_df["Status"] == "Success"].copy()
+    else:
+        display_report_df = report_df.copy()
+
+    st.dataframe(
+        display_report_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander("📄 View Plain-Text Report Lines (e.g. 312547493833 - Success)", expanded=rep_summary["not_success_count"] > 0):
+        display_lines = display_report_df["Report"].tolist() if not display_report_df.empty else report_lines
+        st.code("\n".join(display_lines) if display_lines else "No rows to display.", language="text")
+
+    rep_dl_col1, rep_dl_col2, rep_dl_col3 = st.columns(3)
+    timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    with rep_dl_col1:
+        rep_xlsx_bytes = export_analysis_report_excel(report_data)
+        st.download_button(
+            label=f"📥 Download Report (.xlsx) [{len(report_df)} Rows]",
+            data=rep_xlsx_bytes,
+            file_name=f"live_analysis_report_{prefix}_{timestamp_str}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"{prefix}_download_reconciliation_xlsx",
+            use_container_width=True,
+        )
+    with rep_dl_col2:
+        rep_csv_bytes = report_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label=f"📄 Download Report (.csv) [{len(report_df)} Rows]",
+            data=rep_csv_bytes,
+            file_name=f"live_analysis_report_{prefix}_{timestamp_str}.csv",
+            mime="text/csv",
+            key=f"{prefix}_download_reconciliation_csv",
+            use_container_width=True,
+        )
+    with rep_dl_col3:
+        rep_txt_bytes = "\n".join(report_lines).encode("utf-8")
+        st.download_button(
+            label=f"📝 Download Report (.txt) [{len(report_df)} Rows]",
+            data=rep_txt_bytes,
+            file_name=f"live_analysis_report_{prefix}_{timestamp_str}.txt",
+            mime="text/plain",
+            key=f"{prefix}_download_reconciliation_txt",
+            use_container_width=True,
+        )
+
+    # 5. Export & Next Module Buttons
+    st.markdown("---")
+    st.markdown("### 📥 Export & Next Module (Send to Database)")
+
+    export_df = filtered_df.copy()
+    if len(filtered_df) < len(results_df):
+        st.warning(
+            f"⚠️ **Active UI Filter Notice:** `{len(results_df) - len(filtered_df)}` row(s) are currently hidden by your UI filter "
+            f"(`{len(filtered_df)}` of `{len(results_df)}` analyzed rows shown). Choose below which dataset to export or send to the database:"
+        )
+        scope_choice = st.radio(
+            "Dataset Scope for Export & Database Upload:",
+            [
+                f"All Analyzed Rows ({len(results_df)} rows - Recommended)",
+                f"Filtered Rows Only ({len(filtered_df)} rows)",
+            ],
+            index=0,
+            horizontal=True,
+            key=f"{prefix}_export_scope_radio",
+        )
+        if scope_choice.startswith("All Analyzed Rows"):
+            export_df = results_df.copy()
+
+    if "Analyzing Software Name" not in export_df.columns:
+        export_df["Analyzing Software Name"] = "InternalAMZ"
+    else:
+        export_df["Analyzing Software Name"] = (
+            export_df["Analyzing Software Name"]
+            .fillna("InternalAMZ")
+            .replace("", "InternalAMZ")
+        )
+
     d_col1, d_col2, d_col3, d_col4 = st.columns(4)
 
-    timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     with d_col1:
-        # Before generating the excel of prepared data, ensure column is filled with "InternalAMZ"
-        if "Analyzing Software Name" not in filtered_df.columns:
-            filtered_df["Analyzing Software Name"] = "InternalAMZ"
-        else:
-            filtered_df["Analyzing Software Name"] = (
-                filtered_df["Analyzing Software Name"]
-                .fillna("InternalAMZ")
-                .replace("", "InternalAMZ")
-            )
-        xlsx_bytes = export_to_target_excel(filtered_df)
+        xlsx_bytes = export_to_target_excel(export_df)
         st.download_button(
-            label="📥 Download Target Excel (.xlsx)",
+            label=f"📥 Download Target Excel ({len(export_df)} rows)",
             data=xlsx_bytes,
             file_name=f"amazon_wholesale_{prefix}_{timestamp_str}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -171,17 +295,9 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
         )
 
     with d_col2:
-        if "Analyzing Software Name" not in filtered_df.columns:
-            filtered_df["Analyzing Software Name"] = "InternalAMZ"
-        else:
-            filtered_df["Analyzing Software Name"] = (
-                filtered_df["Analyzing Software Name"]
-                .fillna("InternalAMZ")
-                .replace("", "InternalAMZ")
-            )
-        csv_data = filtered_df.to_csv(index=False).encode("utf-8")
+        csv_data = export_df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="📄 Download Analysis CSV",
+            label=f"📄 Download Analysis CSV ({len(export_df)} rows)",
             data=csv_data,
             file_name=f"amazon_wholesale_{prefix}_{timestamp_str}.csv",
             mime="text/csv",
@@ -190,14 +306,24 @@ def _render_analysis_results(results_df: pd.DataFrame, prefix: str = "quick"):
         )
 
     with d_col3:
-        if st.button("☁️ Send Data to Module 3 (Cloudflare D1)", type="secondary", key=f"{prefix}_send_to_uploader_btn", use_container_width=True):
-            st.session_state["pending_d1_upload"] = filtered_df
+        if st.button(
+            f"☁️ Send {len(export_df)} Rows to Module 3 (Cloudflare D1)",
+            type="secondary",
+            key=f"{prefix}_send_to_uploader_btn",
+            use_container_width=True,
+        ):
+            st.session_state["pending_d1_upload"] = export_df
             st.session_state["active_module"] = "uploader"
             st.rerun()
 
     with d_col4:
-        if st.button("🐬 Send Data to Module 5 (MySQL Remote DB)", type="secondary", key=f"{prefix}_send_to_mysql_uploader_btn", use_container_width=True):
-            st.session_state["pending_mysql_upload"] = filtered_df
+        if st.button(
+            f"🐬 Send {len(export_df)} Rows to Module 5 (MySQL Remote DB)",
+            type="secondary",
+            key=f"{prefix}_send_to_mysql_uploader_btn",
+            use_container_width=True,
+        ):
+            st.session_state["pending_mysql_upload"] = export_df
             st.session_state["active_module"] = "mysql_uploader"
             st.rerun()
 
@@ -534,6 +660,13 @@ def render_analyzer_ui():
                 if sample_costs:
                     st.caption(f"Sample Unit Costs: `{', '.join(sample_costs)}`")
 
+            st.session_state["bulk_supplier_df"] = df
+            st.session_state["bulk_upc_col"] = upc_col
+            st.session_state["bulk_cost_col"] = cost_col
+            aux_cols = detect_auxiliary_columns(df, upc_col, cost_col)
+            title_col = aux_cols.get("title_col")
+            ref_link_col = aux_cols.get("ref_link_col")
+
             active_wholesaler = st.session_state.get("wholesaler_company_name", "").strip()
             catalog_name = uploaded_file.name if uploaded_file is not None else "sample_supplier_catalog.csv"
             checkpoint_xlsx_path, latest_xlsx_path = _get_autosave_paths(
@@ -642,6 +775,8 @@ def render_analyzer_ui():
                         row = df.iloc[pos_idx]
                         raw_id = row.get(upc_col, "")
                         raw_cost = clean_cost(row.get(cost_col, 0.0))
+                        row_title = str(row.get(title_col, "") or "").strip() if title_col else ""
+                        row_ref = str(row.get(ref_link_col, "") or "").strip() if ref_link_col else ""
 
                         clean_id, id_type = clean_identifier(raw_id)
                         current_num = pos_idx + 1
@@ -661,6 +796,8 @@ def render_analyzer_ui():
                             selected_marketplace,
                             is_demo=is_demo,
                             cost=raw_cost,
+                            title=row_title,
+                            ref_asin=row_ref,
                         )
 
                         target_row = build_full_target_row(
@@ -703,5 +840,11 @@ def render_analyzer_ui():
 
         # Self-contained Bulk Search Output & Export Section
         if "bulk_analysis_results" in st.session_state and not st.session_state["bulk_analysis_results"].empty:
-            _render_analysis_results(st.session_state["bulk_analysis_results"], prefix="bulk")
+            _render_analysis_results(
+                st.session_state["bulk_analysis_results"],
+                prefix="bulk",
+                supplier_df=st.session_state.get("bulk_supplier_df", df),
+                upc_col=st.session_state.get("bulk_upc_col"),
+                cost_col=st.session_state.get("bulk_cost_col"),
+            )
 

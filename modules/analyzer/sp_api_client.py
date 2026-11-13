@@ -668,17 +668,68 @@ def _generate_demo_data(
     }
 
 
-def _select_best_catalog_item(items):
+def _extract_asin_from_text(val: str) -> str:
+    """Extract a 10-character Amazon ASIN from a raw string or Amazon URL if present."""
+    if not val:
+        return ""
+    s = str(val).strip()
+    m_url = re.search(r"(?:/dp/|/gp/product/)([A-Z0-9]{10})", s, re.IGNORECASE)
+    if m_url:
+        return m_url.group(1).upper()
+    if re.fullmatch(r"B0[A-Z0-9]{8}", s.upper()):
+        return s.upper()
+    return ""
+
+
+def _select_best_catalog_item(items, user_title="", ref_asin=""):
     """
     When search_catalog_items returns multiple catalog items for a barcode/keyword,
-    prefer the item that has a valid sales rank (lowest BSR) and single package quantity.
+    prefer the item that matches ref_asin or user_title (especially shade/number tokens),
+    single package quantity, and valid sales rank (lowest BSR).
     """
     if not items:
         return None
     if len(items) == 1:
         return items[0]
 
+    clean_ref = _extract_asin_from_text(ref_asin)
+    u_title_low = str(user_title or "").strip().lower()
+    # Extract distinct tokens and numeric shade codes (e.g. "011", "013") from supplier title
+    u_tokens = set(re.findall(r"[a-z0-9]+", u_title_low))
+    u_shade_nums = set(re.findall(r"\b0\d{1,3}\b|\b\d{2,3}\b", u_title_low))
+
     def _item_sort_key(it):
+        it_asin = str(it.get("asin", "")).strip().upper()
+        ref_match = 0 if (clean_ref and it_asin == clean_ref) else 1
+
+        summaries = it.get("summaries", [])
+        it_title = ""
+        pkg_q = 1
+        if summaries:
+            it_title = str(summaries[0].get("itemName", "") or "").lower()
+            it_color = str(summaries[0].get("color", "") or "").lower()
+            it_title_full = f"{it_title} {it_color}"
+            try:
+                pkg_q = int(summaries[0].get("packageQuantity", 1) or 1)
+            except (ValueError, TypeError):
+                pkg_q = 1
+        else:
+            it_title_full = ""
+
+        shade_match = 0
+        token_overlap = 0
+        if u_title_low and it_title_full:
+            it_tokens = set(re.findall(r"[a-z0-9]+", it_title_full))
+            if u_shade_nums:
+                # If supplier title has a shade number (like 013), strongly prefer catalog item containing 013
+                if u_shade_nums.issubset(it_tokens):
+                    shade_match = -2
+                elif u_shade_nums.intersection(it_tokens):
+                    shade_match = -1
+                else:
+                    shade_match = 1
+            token_overlap = -len(u_tokens.intersection(it_tokens))
+
         best_rank = 999999999
         for sr in it.get("salesRanks", []):
             for dr in sr.get("displayGroupRanks", []) + sr.get("classificationRanks", []) + sr.get("ranks", []):
@@ -688,14 +739,15 @@ def _select_best_catalog_item(items):
                         best_rank = min(best_rank, int(r_val))
                     except (ValueError, TypeError):
                         pass
-        summaries = it.get("summaries", [])
-        pkg_q = 1
-        if summaries:
-            try:
-                pkg_q = int(summaries[0].get("packageQuantity", 1) or 1)
-            except (ValueError, TypeError):
-                pkg_q = 1
-        return (0 if best_rank < 999999999 else 1, 0 if pkg_q == 1 else 1, best_rank)
+
+        return (
+            ref_match,
+            shade_match,
+            0 if pkg_q == 1 else 1,
+            token_overlap,
+            0 if best_rank < 999999999 else 1,
+            best_rank,
+        )
 
     sorted_items = sorted(items, key=_item_sort_key)
     return sorted_items[0]
@@ -710,6 +762,7 @@ def fetch_amazon_item_data(
     asin=None,
     upc=None,
     title=None,
+    ref_asin=None,
 ):
     """
     Query Amazon SP-API for a product's full target dataset.
@@ -822,7 +875,8 @@ def fetch_amazon_item_data(
     about_this_item = ""
     customer_reviews = "No reviews found"
     catalog_list_price = None
-    status_msg = "OK"
+    status_msg = "Success"
+    item = {}
 
     # 1. Fetch Catalog Items (Version 2022-04-01)
     try:
@@ -851,7 +905,7 @@ def fetch_amazon_item_data(
             )
             payload_data = search_res.payload or {}
             items = payload_data.get("items", [])
-            item = _select_best_catalog_item(items)
+            item = _select_best_catalog_item(items, user_title=user_title, ref_asin=ref_asin)
         else:
             search_res = _call_sp_api_with_retry(
                 catalog_api.search_catalog_items,
@@ -873,9 +927,10 @@ def fetch_amazon_item_data(
                 )
                 payload_data = search_res.payload or {}
                 items = payload_data.get("items", [])
-            item = _select_best_catalog_item(items)
+            item = _select_best_catalog_item(items, user_title=user_title, ref_asin=ref_asin)
 
         if not item:
+            not_found_reason = f"{id_type} not found on amazon"
             return {
                 "asin": "NOT_FOUND",
                 "parent_asin": "",
@@ -913,11 +968,11 @@ def fetch_amazon_item_data(
                 "is_hazmat": "False",
                 "keepa": "",
                 "camelcc": "",
-                "custom_notes": "",
+                "custom_notes": not_found_reason,
                 "image_links": [],
                 "customer_reviews": "No reviews found",
                 "about_this_item": "",
-                "status_msg": "No catalog match",
+                "status_msg": not_found_reason,
             }
 
         asin = item.get("asin", clean_id)
@@ -1094,7 +1149,51 @@ def fetch_amazon_item_data(
                 about_this_item = ""
 
     except Exception as e:
-        status_msg = f"Catalog error: {e}"
+        status_msg = f"Amazon API error: {e}"
+        if asin == "NOT_FOUND":
+            return {
+                "asin": "NOT_FOUND",
+                "parent_asin": "",
+                "favorite": "False",
+                "product_id": prod_id,
+                "brand": "N/A",
+                "brand_restriction": "False",
+                "selling_restriction": "not eligible",
+                "selling_restriction_link": None,
+                "title": user_title if user_title else "Product not found on Amazon",
+                "package_quantity": 1,
+                "amazon_link": "",
+                "current_est_sales": 5,
+                "is_top_level_category": "True",
+                "category": "Unknown",
+                "sales_rank": None,
+                "sub_category": None,
+                "sub_category_sales_rank": None,
+                "sell_price": None,
+                "buybox_landed": None,
+                "lowest_fba": None,
+                "lowest_fbm": None,
+                "package_dimensions": "",
+                "package_weight": None,
+                "total_offers": 0,
+                "new_fba_offers": 0,
+                "new_fbm_offers": 0,
+                "buybox_contention": 0,
+                "manufacturer": "",
+                "color": "",
+                "model": "",
+                "size": "",
+                "part_number": "",
+                "material": "",
+                "is_hazmat": "False",
+                "keepa": "",
+                "camelcc": "",
+                "custom_notes": status_msg,
+                "image_links": [],
+                "customer_reviews": "No reviews found",
+                "about_this_item": "",
+                "status_msg": status_msg,
+            }
 
     # 2. Fetch Live Price & Offers (Products Pricing API with retry + Competitive Pricing fallback)
     buybox_landed = None

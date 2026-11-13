@@ -47,6 +47,12 @@ except ImportError:
     export_to_target_excel = None
 
 try:
+    from .report_generator import generate_analysis_report, export_analysis_report_excel
+except ImportError:
+    generate_analysis_report = None
+    export_analysis_report_excel = None
+
+try:
     from .ui import render_analyzer_ui
 except ImportError:
     render_analyzer_ui = None
@@ -65,5 +71,7 @@ __all__ = [
     "build_full_target_row",
     "test_lwa_connection",
     "export_to_target_excel",
+    "generate_analysis_report",
+    "export_analysis_report_excel",
     "render_analyzer_ui",
 ]

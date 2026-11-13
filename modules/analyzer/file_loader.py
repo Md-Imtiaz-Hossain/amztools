@@ -152,9 +152,9 @@ def detect_catalog_columns(df: pd.DataFrame):
         score = 0
 
         # Strongly penalize Case Pack / Qty / Case Price / MSRP / Retail / Amazon / Fee columns
-        if any(w in words for w in ("qty", "quantity", "pack", "pk", "stock", "available", "moq", "min", "minimum", "rank", "bsr", "offers", "weight", "upc", "ean", "asin", "sku", "id")):
+        if any(w in words for w in ("qty", "quantity", "pack", "pk", "stock", "available", "moq", "rank", "bsr", "offers", "weight", "upc", "ean", "asin", "sku", "id")):
             score -= 120
-        if any(phrase in c_norm for phrase in ("case pack", "master pack", "inner pack", "case qty", "box qty", "pack size", "package quantity")):
+        if any(phrase in c_norm for phrase in ("case pack", "case size", "box size", "master pack", "inner pack", "case qty", "box qty", "pack size", "package quantity", "not per case")):
             score -= 150
         if any(phrase in c_norm for phrase in ("case price", "case cost", "box price", "master case", "ext price", "extended price", "total price", "total cost")):
             score -= 80
@@ -196,6 +196,54 @@ def detect_catalog_columns(df: pd.DataFrame):
 
     best_cost_idx = max(cost_scores)[2] if cost_scores else (1 if num_cols > 1 and best_upc_idx == 0 else 0)
     return best_upc_idx, best_cost_idx
+
+
+def detect_auxiliary_columns(df: pd.DataFrame, upc_col: str = None, cost_col: str = None) -> dict:
+    """
+    Detect optional auxiliary columns in a supplier DataFrame:
+      - title_col: Product Title / Name / Description
+      - sku_col: Supplier SKU / ProductId / Item Code (distinct from upc_col)
+      - ref_link_col: Amazon Reference Link / Reference ASIN column
+    """
+    result = {"title_col": None, "sku_col": None, "ref_link_col": None}
+    if df is None or df.empty:
+        return result
+
+    used = {upc_col, cost_col}
+    for col in df.columns:
+        if col in used:
+            continue
+        c_low = str(col).strip().lower()
+        c_norm = re.sub(r"[^a-z0-9]+", " ", c_low).strip()
+        words = set(c_norm.split())
+
+        if result["title_col"] is None and (
+            c_norm in ("title", "product title", "item title", "product name", "item name", "description", "item description")
+            or "title" in words
+            or ("description" in words and "link" not in words)
+        ):
+            result["title_col"] = col
+            used.add(col)
+            continue
+
+        if result["ref_link_col"] is None and (
+            ("amazon" in words and ("link" in words or "url" in words or "asin" in words or "reference" in words))
+            or c_norm in ("amazon link", "asin", "reference asin", "amz link")
+        ):
+            result["ref_link_col"] = col
+            used.add(col)
+            continue
+
+        if result["sku_col"] is None and (
+            c_norm in ("productid", "product id", "sku", "item id", "item no", "item number", "item code", "model", "part number")
+            or any(w in words for w in ("productid", "sku"))
+        ):
+            result["sku_col"] = col
+            used.add(col)
+            continue
+
+    return result
+
 
 
 def load_supplier_file(uploaded_file):
